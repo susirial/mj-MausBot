@@ -6,6 +6,8 @@ import { filterCustomModels, partitionCustomModels, suggestedModels } from "./cu
 import { engineDisplayName, isCustomOnly, SIGN_IN_FAMILY_LABEL, signInFamily, splitEngineRail } from "./engine-rail";
 import { displayModelLabel, shortModelLabel } from "./model-friendly";
 import { choiceIsSelected, modelChoices, takesTypedModels, type ModelChoice } from "./model-choices";
+import { endpointModelStatus } from "./engine-connection-status";
+import { decodeCodexSelection } from "../../shared/codex-selection";
 
 export type ModelOption = InstanceInfo["models"]["options"][number];
 
@@ -57,6 +59,16 @@ export interface MenuCurrent {
   pending: boolean;
   /** The organization turned the selected model off: nothing to set up, only another model to pick. */
   blocked?: boolean;
+  /** The saved choice names an AI account that is no longer listed. */
+  missing?: true;
+  replacement?: MenuReplacement;
+}
+
+export interface MenuReplacement {
+  instance: InstanceInfo;
+  model: string;
+  label: string;
+  account: string;
 }
 
 export interface SimpleMenu {
@@ -99,7 +111,8 @@ export function variantSuffix(instance: InstanceInfo | undefined, model: string,
 
 export function modelName(instance: InstanceInfo | undefined, model: string, variant?: string): string {
   const option = instance?.models.options.find((candidate) => candidate.id === model);
-  if (!instance || !option) return model;
+  if (!instance) return decodeCodexSelection(model).model ?? model;
+  if (!option) return model;
   return displayModelLabel(modelOptionLabel(option), providerName(instance), option.custom) + variantSuffix(instance, model, variant);
 }
 
@@ -132,13 +145,46 @@ function heading(instance: InstanceInfo, listed: readonly InstanceInfo[]): Pick<
   return { label: account ? `${provider} · ${account}` : provider, provider, account };
 }
 
+function selectable(instance: InstanceInfo, option: ModelOption): boolean {
+  if (instance.policy || needsCli(instance) || option.orgBlocked) return false;
+  if (needsSignIn(instance) && !isCustomOnly(instance) && !option.custom) return false;
+  return !instance.engineEndpoint || endpointModelStatus(instance, option.id).canSelect;
+}
+
+/** The first listed account that offers the same model, by exact id first and then by its bare model id. */
+export function orphanReplacement(listed: readonly InstanceInfo[], model: string): MenuReplacement | undefined {
+  const bare = decodeCodexSelection(model).model ?? model;
+  const { subscription, api, custom } = splitEngineRail(listed);
+  const ordered = [...subscription, ...api, ...custom];
+  const matches = (exact: boolean) => {
+    for (const instance of ordered) {
+      const option = instance.models.options.find((candidate) => exact ? candidate.id === model : decodeCodexSelection(candidate.id).model === bare);
+      if (option && selectable(instance, option)) {
+        return { instance, model: option.id, label: modelOptionLabel(option), account: engineDisplayName(instance) };
+      }
+    }
+    return undefined;
+  };
+  return matches(true) ?? matches(false);
+}
+
+function missingRow(input: SimpleMenuInput): MenuCurrent {
+  const bare = modelName(undefined, input.selection.model);
+  const provider = bare === input.selection.model ? undefined : decodeCodexSelection(input.selection.model).modelProvider;
+  const row = { label: bare, title: provider ? `${provider} · ${bare}` : bare, warning: false, pending: false };
+  if (input.loading) return { ...row, pending: true };
+  if (!input.selection.instanceId) return { ...row, meta: t("model.simple.unavailable"), warning: true };
+  const replacement = orphanReplacement(input.listed, input.selection.model);
+  return { ...row, meta: t("model.simple.accountRemoved"), warning: true, missing: true, ...(replacement ? { replacement } : {}) };
+}
+
 function currentRow(input: SimpleMenuInput): MenuCurrent {
-  const { instances, selection, bot, loading } = input;
+  const { instances, selection, bot } = input;
   const active = instances.find((instance) => instance.instanceId === selection.instanceId);
-  const option = active?.models.options.find((candidate) => candidate.id === selection.model);
+  if (!active) return missingRow(input);
+  const option = active.models.options.find((candidate) => candidate.id === selection.model);
   const name = option ? modelOptionLabel(option) : selection.model;
-  const row = { instance: active, label: modelName(active, selection.model, selection.variant), title: active ? `${engineDisplayName(active)} · ${name}${variantSuffix(active, selection.model, selection.variant)}` : name, warning: false, pending: false };
-  if (!active) return loading ? { ...row, pending: true } : { ...row, meta: t("model.simple.unavailable"), warning: true };
+  const row = { instance: active, label: modelName(active, selection.model, selection.variant), title: `${engineDisplayName(active)} · ${name}${variantSuffix(active, selection.model, selection.variant)}`, warning: false, pending: false };
   if (!option && input.refreshing === active.instanceId) return { ...row, pending: true };
   if (option?.orgBlocked) return { ...row, meta: t("model.orgBlocked"), warning: true, blocked: true };
   if (active.policy) return { ...row, meta: t("policy.managedBy", { organization: active.policy.organizationName }), warning: true };

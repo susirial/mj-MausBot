@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Check, ChevronDown, ChevronRight, ChevronUp, Download, Loader2, LogIn, RefreshCw, Search, Settings, X } from "lucide-react";
+import { AlertTriangle, Check, ChevronDown, ChevronRight, ChevronUp, Download, Loader2, LogIn, RefreshCw, Search, Settings, X } from "lucide-react";
 import type { Bot, InstanceInfo } from "@/state/store";
 import type { EffortLevel } from "../../shared/wire";
 import type { MenuGroup, MenuModelRow, SimpleMenu } from "@/lib/simple-model-menu";
@@ -199,6 +199,7 @@ function Thinking({ thinking, labelId }: { thinking: SimpleThinking; labelId: st
 export function SimpleModelMenu(props: SimpleModelMenuProps) {
   const { menu, query, idPrefix } = props;
   const current = menu.current;
+  const replacement = current?.replacement;
   const top = Boolean(current || menu.follow);
   return (
     <div data-simple-model-menu className="flex min-h-0 flex-1 flex-col">
@@ -236,6 +237,7 @@ export function SimpleModelMenu(props: SimpleModelMenuProps) {
               onClick={(event) => {
                 const setUp = current.warning && current.instance && !current.instance.policy && !current.blocked ? current.instance : undefined;
                 if (setUp) props.onSetUp(setUp, event.detail === 0);
+                else if (current.missing && props.onManage) props.onManage();
                 else props.onPickCurrent();
               }}
               className={SIMPLE_MENU_ROW}
@@ -243,13 +245,25 @@ export function SimpleModelMenu(props: SimpleModelMenuProps) {
               <Gutter>
                 {current.instance
                   ? <InstanceProviderMark instance={current.instance} size={14} subtle />
-                  : <span className="size-3.5 rounded-full bg-ink/[0.08]" aria-hidden="true" />}
+                  : current.missing
+                    ? <AlertTriangle size={14} strokeWidth={MENU_STROKE} className="text-warning" aria-hidden="true" />
+                    : <span className="size-3.5 rounded-full bg-ink/[0.08]" aria-hidden="true" />}
               </Gutter>
               <RowLines label={current.label}>
                 {current.meta && <span className={cn(SIMPLE_MENU_META, current.warning && "text-warning")}>{current.meta}</span>}
               </RowLines>
               {current.pending && <Loader2 size={14} className="shrink-0 animate-spin text-ink-tertiary" aria-hidden="true" />}
-              <Check size={14} className="shrink-0 text-accent" aria-hidden="true" />
+              <Check size={14} className={cn("shrink-0", current.missing ? "text-ink-tertiary" : "text-accent")} aria-hidden="true" />
+            </button>
+          )}
+          {replacement && (
+            <button type="button" data-menu-row data-simple-replacement tabIndex={-1}
+              title={`${replacement.account} · ${replacement.label}`}
+              onClick={() => props.onPick(replacement.instance, replacement.model)} className={SIMPLE_MENU_ROW}>
+              <Gutter><InstanceProviderMark instance={replacement.instance} size={14} subtle /></Gutter>
+              <RowLines label={t("model.simple.useReplacement", { name: replacement.label })}>
+                <span className={SIMPLE_MENU_META}>{replacement.account}</span>
+              </RowLines>
             </button>
           )}
           {menu.follow && (

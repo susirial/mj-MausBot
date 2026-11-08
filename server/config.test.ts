@@ -884,6 +884,15 @@ describe("saving the newer sections", () => {
 });
 
 describe("default fleet", () => {
+  it("keeps the default accounts beside independent API connections that were saved without them", () => {
+    const endpoint = { driver: "codex", displayName: "codex-deepseek", config: { endpoint: { version: 1 } } };
+    const map = instanceConfigs({ instances: { "codex-endpoint-1": endpoint } });
+    expect(map.codex).toMatchObject({ driver: "codex" });
+    expect(map.claude).toMatchObject({ driver: "claudeAgent" });
+    expect(map["codex-endpoint-1"]).toMatchObject(endpoint);
+    expect(persistableInstanceConfigs({ instances: { "codex-endpoint-1": endpoint } })).toHaveProperty("codex");
+  });
+
   it("adds Groq to product fleets and keeps its workspace key away from other accounts", () => {
     const cfg: AppConfig = { groq: { key: "groq-workspace", url: "https://proxy.example.test/openai/v1" }, instances: {
       codex: { driver: "codex" },

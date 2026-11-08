@@ -2892,6 +2892,8 @@
   "model.simple.reasoning": "Raciocínio",
   "model.simple.botsModel": "Modelo de {name}",
   "model.simple.unavailable": "Indisponível",
+  "model.simple.accountRemoved": "A conta de IA foi removida",
+  "model.simple.useReplacement": "Usar {name}",
   "model.orgBlocked": "Desligado pela sua organização",
   "model.simple.signIn": "Entrar",
   "model.simple.lookingModels": "Buscando modelos…",

@@ -2842,6 +2842,8 @@
   "model.simple.reasoning": "推論",
   "model.simple.botsModel": "{name} のモデル",
   "model.simple.unavailable": "利用不可",
+  "model.simple.accountRemoved": "元の AI アカウントは削除されました",
+  "model.simple.useReplacement": "代わりに {name} を使う",
   "model.orgBlocked": "組織によってオフにされています",
   "model.simple.signIn": "サインイン",
   "model.simple.lookingModels": "モデルを検索中…",

@@ -254,7 +254,7 @@ export function BackupAis({ bot, onChange }: { bot: Bot; onChange: (fallback: Ba
                       ? <InstanceProviderMark instance={instance} size={14} subtle />
                       : <span className="size-3.5 shrink-0 rounded-full bg-ink/[0.08]" aria-hidden="true" />}
                     <span className="min-w-0 flex-1 truncate">{short}</span>
-                    {!instance && <span className="shrink-0 text-[12px] text-warning">{t("model.simple.unavailable")}</span>}
+                    {!instance && <span className="shrink-0 text-[12px] text-warning">{t("model.simple.accountRemoved")}</span>}
                     <ChevronDown size={12} strokeWidth={2} aria-hidden="true" className="shrink-0 text-ink-tertiary group-hover:text-ink-secondary" />
                   </BackupChooser>
                   <TrashButton

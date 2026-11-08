@@ -3086,6 +3086,8 @@
   "model.simple.reasoning": "Reasoning",
   "model.simple.botsModel": "{name}'s model",
   "model.simple.unavailable": "Unavailable",
+  "model.simple.accountRemoved": "Its AI account was removed",
+  "model.simple.useReplacement": "Use {name} instead",
   "model.orgBlocked": "Turned off by your organization",
   "model.simple.signIn": "Sign in",
   "model.simple.lookingModels": "Looking for models…",

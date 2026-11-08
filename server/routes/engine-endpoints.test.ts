@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { z } from "zod";
 import { json, readBody } from "../harness/http.ts";
-import type { AppConfig } from "../config.ts";
+import { instanceConfigs, type AppConfig } from "../config.ts";
 import { createEngineEndpointRoutes } from "./engine-endpoints.ts";
 import { dispatchRoutes } from "./table.ts";
 
@@ -20,8 +20,8 @@ const connection = {
   }] },
 };
 
-async function fixture(options: { hosted?: boolean; busy?: boolean } = {}) {
-  const cfg: AppConfig = { instances: { codex: { driver: "codex" }, claude: { driver: "claudeAgent" } } };
+async function fixture(options: { hosted?: boolean; busy?: boolean; cfg?: AppConfig } = {}) {
+  const cfg: AppConfig = options.cfg ?? { instances: { codex: { driver: "codex" }, claude: { driver: "claudeAgent" } } };
   let saving = false, saves = 0;
   const route = createEngineEndpointRoutes({
     cfg, dataDir: "/tmp/omb-route-fixture", hostedModels: options.hosted ?? false,
@@ -65,6 +65,16 @@ it("creates independent entries once and recovers an identical retried operation
   expect(retry.status).toBe(201);
   expect(commitSchema.parse(await retry.json()).instanceIds).toEqual(result.instanceIds);
   expect(f.saves()).toBe(1);
+});
+
+it("keeps the default accounts when the first connection is saved on a workspace that never listed them", async () => {
+  const f = await fixture({ cfg: {} });
+  const created = await f.call("/api/instances/engine-endpoints", {
+    operationId: randomUUID(), displayName: "Kimi", provider: "kimi", apiKey: "fixture-private-key", connections: [connection],
+  });
+  expect(created.status).toBe(201);
+  const [id] = commitSchema.parse(await created.json()).instanceIds;
+  expect(Object.keys(instanceConfigs(f.cfg))).toEqual(expect.arrayContaining(["codex", "claude", id]));
 });
 
 it("rejects endpoint creation on hosted workspaces", async () => {

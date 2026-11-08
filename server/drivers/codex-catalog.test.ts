@@ -5,13 +5,8 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CodexDriver } from "./codex.ts";
-import {
-  decodeCodexSelection,
-  encodeCodexSelection,
-  OFFICIAL_CODEX_PROVIDER,
-  readCodexModelCatalog,
-  STATIC_CODEX_MODELS,
-} from "./codex-catalog.ts";
+import { readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
+import { decodeCodexSelection, encodeCodexSelection } from "../../shared/codex-selection.ts";
 
 const scratchDirs: string[] = [];
 const FAKE_CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "testing", "fake-codex-app-server.ts");
@@ -32,29 +27,6 @@ function scratchHome(files: Record<string, string>, parent = tmpdir()): string {
   }
   return home;
 }
-
-describe("decodeCodexSelection", () => {
-  it("forces official rows onto the ChatGPT provider", () => {
-    expect(decodeCodexSelection("gpt-5.6-sol")).toEqual({
-      model: "gpt-5.6-sol",
-      modelProvider: OFFICIAL_CODEX_PROVIDER,
-    });
-  });
-
-  it("forces newly discovered bare ids onto the ChatGPT provider too", () => {
-    expect(decodeCodexSelection("gpt-future-codex")).toEqual({
-      model: "gpt-future-codex",
-      modelProvider: OFFICIAL_CODEX_PROVIDER,
-    });
-  });
-
-  it("splits provider-encoded custom ids", () => {
-    expect(decodeCodexSelection("omlx::Qwen3.6-35B-A3B-bf16:qwen3-5-6-n-r-reasoning")).toEqual({
-      model: "Qwen3.6-35B-A3B-bf16:qwen3-5-6-n-r-reasoning",
-      modelProvider: "omlx",
-    });
-  });
-});
 
 describe("readCodexModelCatalog", () => {
   it("returns the static cloud fallback when there is no config or CLI probe", async () => {

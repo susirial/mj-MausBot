@@ -622,7 +622,7 @@ export function ModelPicker({
         modelProvider(active, selection.model) ? ` · ${modelProvider(active, selection.model)}` : ""
       }${selectedVariantLabel ? ` · ${selectedVariantLabel}` : selection.effort
         ? ` · ${t(advanced ? "model.effort.summary" : "model.simple.thinkingSummary", { level: effortLabel(selection.effort) })}` : ""}`
-    : selection.model;
+    : modelName(undefined, selection.model);
   const followLine = follows === true ? `\n${t("model.followsBot", { name: profile.name })}` : follows === false ? `\n${t("model.ownModel")}` : "";
   const attentionLine = !advanced && attention ? `\n${attention}` : "";
   const busyLine = bot.busy ? `\n${t(threadId ? "model.threadBusy" : "model.busy")}` : "";
@@ -671,7 +671,7 @@ export function ModelPicker({
           {active && showActiveAccount && (
             <span data-model-account className="text-ink-secondary">{engineDisplayName(active)} · </span>
           )}
-          {modelLabel(active, selection.model)}
+          {active ? modelLabel(active, selection.model) : modelName(undefined, selection.model)}
           {active && modelProvider(active, selection.model) && (
             <span className="text-ink-secondary"> · {modelProvider(active, selection.model)}</span>
           )}

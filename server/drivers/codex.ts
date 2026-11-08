@@ -43,7 +43,8 @@ import type {
   TextGenerationOptions,
 } from "../contracts.ts";
 import { newEventId, newId } from "../contracts.ts";
-import { codexSelectedProviderArgs, decodeCodexSelection, OFFICIAL_CODEX_PROVIDER, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
+import { codexSelectedProviderArgs, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
+import { decodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "../../shared/codex-selection.ts";
 import { codexLocalProviderArgs } from "./local-inject.ts";
 import { codexBackgroundRoute, runCodexBackgroundRoute, runCodexOneShot } from "./codex-background-text.ts";
 import { augmentedPath } from "../env-path.ts";
@@ -72,7 +73,8 @@ import { assertToolScopeSupported } from "../../shared/tool-scope-support.ts";
 import { appMountFor, gateServer, mcpStdioServer } from "../mcp-gate-config.ts"; import { OWN_APPS_SERVER } from "../../shared/own-apps.ts";
 import { CALL_TOOL, DESCRIBE_TOOL, SEARCH_TOOL, directoryCallTarget } from "../mcp-directory.ts"; import { codexCommandOutput, codexPatchProgress } from "./tool-progress.ts";
 
-export { decodeCodexSelection, readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
+export { readCodexModelCatalog, STATIC_CODEX_MODELS } from "./codex-catalog.ts";
+export { decodeCodexSelection } from "../../shared/codex-selection.ts";
 
 const DRIVER_KIND = "codex";
 

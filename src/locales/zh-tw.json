@@ -3021,6 +3021,8 @@
   "model.simple.reasoning": "推理",
   "model.simple.botsModel": "{name} 的模型",
   "model.simple.unavailable": "無法使用",
+  "model.simple.accountRemoved": "原帳戶已移除",
+  "model.simple.useReplacement": "改用 {name}",
   "model.orgBlocked": "已被你的組織關閉",
   "model.simple.signIn": "登入",
   "model.simple.lookingModels": "正在尋找模型…",

@@ -213,11 +213,50 @@ describe("the Simple model menu", () => {
     expect(menu([claude()]).follow).toBe(false);
   });
 
-  it("shows a model whose engine has not loaded as waiting, then as unavailable", () => {
+  it("shows a model whose engine has not loaded as waiting, then as its account removed", () => {
     expect(menu([], { loading: true }).current).toMatchObject({ label: "sonnet-5", pending: true });
+    expect(menu([], { loading: true }).current!.missing).toBeUndefined();
     expect(menu([], { loading: true }).empty).toBe("loading");
-    expect(menu([]).current).toMatchObject({ meta: "Unavailable", warning: true, pending: false });
+    expect(menu([]).current).toMatchObject({ meta: "Its AI account was removed", warning: true, pending: false, missing: true });
     expect(menu([]).empty).toBe("none");
+    expect(menu([], { selection: { instanceId: "", model: "" } }).current).toMatchObject({ meta: "Unavailable", warning: true });
+    expect(menu([], { selection: { instanceId: "", model: "" } }).current!.missing).toBeUndefined();
+  });
+
+  describe("a choice whose account was removed", () => {
+    const orphan: ModelSelection = { instanceId: "codex-gone", model: "deepseek::deepseek-flash" };
+    const endpoint = (keyConfigured = true) => engine("codex-endpoint-1", "codex", "codex-deepseek", "api",
+      [{ id: "deepseek-flash", label: "DeepSeek Flash" }, { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" }], {
+        engineEndpoint: {
+          version: 1, revision: 1, provider: "deepseek", baseUrl: "https://api.deepseek.com", backgroundModel: "deepseek-flash",
+          runtime: "codex", protocol: "responses", webSearch: "disabled", keyConfigured, check: { state: "unverified" },
+          catalog: { default: "deepseek-flash", options: ["deepseek-flash", "deepseek-v4-pro"].map((id) => ({
+            id, label: id, source: "preset" as const, inputModalities: ["text" as const], effortLevels: [], nativeSearch: "unknown" as const,
+          })) },
+        },
+      });
+
+    it("names the model without its provider prefix and keeps the provider in the title", () => {
+      expect(menu([claude()], { selection: orphan }).current).toMatchObject({
+        label: "deepseek-flash", title: "deepseek · deepseek-flash", meta: "Its AI account was removed", missing: true,
+      });
+      expect(menu([claude()], { selection: orphan }).current!.replacement).toBeUndefined();
+    });
+
+    it("offers the same model on another account that can run it", () => {
+      const replacement = menu([claude(), endpoint()], { selection: orphan }).current!.replacement;
+      expect(replacement).toMatchObject({ model: "deepseek-flash", label: "DeepSeek Flash", account: "codex-deepseek" });
+      expect(replacement!.instance.instanceId).toBe("codex-endpoint-1");
+    });
+
+    it("offers nothing on an account that cannot run the model yet", () => {
+      expect(menu([claude(), endpoint(false)], { selection: orphan }).current!.replacement).toBeUndefined();
+    });
+
+    it("prefers the exact model id over a bare match", () => {
+      const local = engine("codex-home", "codex", "Codex home", "subscription", [{ id: "deepseek::deepseek-flash", label: "deepseek-flash (deepseek)", custom: true }]);
+      expect(menu([endpoint(), local], { selection: orphan }).current!.replacement).toMatchObject({ model: "deepseek::deepseek-flash" });
+    });
   });
 
   it("counts only models a person can pick toward the search box", () => {

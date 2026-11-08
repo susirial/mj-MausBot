@@ -10,6 +10,7 @@ import { killCliTree, spawnCli } from "../procs.ts";
 import { codexHome } from "./codex-identity.ts";
 import { unconfirmedModelCatalog } from "../startup-model-catalog.ts";
 import { codexLocalProviderArgs, mergeLocalInject } from "./local-inject.ts";
+import { CODEX_MODEL_ID, decodeCodexSelection, encodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "../../shared/codex-selection.ts";
 
 export const STATIC_CODEX_MODELS: ModelCatalog = {
   default: "gpt-5.6-sol",
@@ -28,29 +29,7 @@ export const STATIC_CODEX_MODELS: ModelCatalog = {
   ],
 };
 
-/** Official rows force this provider, so a local `model_provider = "omlx"` cannot swallow GPT-5.6. */
-export const OFFICIAL_CODEX_PROVIDER = "openai";
-
-const SEP = "::";
-const MODEL_ID = /^[\w][\w./:+-]*$/;
 const PROVIDER_ID = /^[a-z][a-z0-9_-]*$/i;
-
-export function encodeCodexSelection(provider: string, model: string): string {
-  return `${provider}${SEP}${model}`;
-}
-
-export function decodeCodexSelection(id: string | null | undefined): {
-  model: string | null;
-  modelProvider: string | null;
-} {
-  if (!id) return { model: null, modelProvider: null };
-  const sep = id.indexOf(SEP);
-  if (sep > 0) {
-    return { model: id.slice(sep + SEP.length), modelProvider: id.slice(0, sep) };
-  }
-  // A bare id is official: a new cloud model must not fall through to the user's local provider.
-  return { model: id, modelProvider: MODEL_ID.test(id) ? OFFICIAL_CODEX_PROVIDER : null };
-}
 
 /** Starts Codex on the chosen model's provider. codex-cli 0.167.0 refuses a turn whose thread provider differs from its
  * current one ("This chat uses custom, but your current provider is magpie"), whatever config.toml's model_provider says. */
@@ -152,7 +131,7 @@ export function readCodexAppServerModelCatalog(
         const seen = new Set<string>();
         let defaultModel: string | null = null;
         for (const row of models) {
-          if (row.hidden === true || typeof row.id !== "string" || !MODEL_ID.test(row.id) || seen.has(row.id)) continue;
+          if (row.hidden === true || typeof row.id !== "string" || !CODEX_MODEL_ID.test(row.id) || seen.has(row.id)) continue;
           seen.add(row.id);
           options.push({
             id: row.id,
@@ -307,7 +286,7 @@ function collectCatalogNames(home: string): Map<string, string> {
       if (!record || typeof record !== "object") continue;
       const row = record as { slug?: unknown; id?: unknown; display_name?: unknown; name?: unknown };
       const slug = typeof row.slug === "string" ? row.slug : typeof row.id === "string" ? row.id : "";
-      if (!MODEL_ID.test(slug)) continue;
+      if (!CODEX_MODEL_ID.test(slug)) continue;
       const label = typeof row.display_name === "string" ? row.display_name : typeof row.name === "string" ? row.name : "";
       if (label) named.set(encodeCodexSelection(provider, slug), label);
     }
@@ -324,10 +303,10 @@ function idsFromModelsPayload(payload: unknown): string[] {
         ? (payload as { models: unknown[] }).models
         : [];
   return records.flatMap((record) => {
-    if (typeof record === "string") return MODEL_ID.test(record) ? [record] : [];
+    if (typeof record === "string") return CODEX_MODEL_ID.test(record) ? [record] : [];
     if (!record || typeof record !== "object") return [];
     const id = (record as { id?: unknown; slug?: unknown }).id ?? (record as { slug?: unknown }).slug;
-    return typeof id === "string" && MODEL_ID.test(id) ? [id] : [];
+    return typeof id === "string" && CODEX_MODEL_ID.test(id) ? [id] : [];
   });
 }
 
@@ -385,7 +364,7 @@ async function catalogAround(
 
   const remember = (provider: string | undefined, model: string | undefined) => {
     if (!provider || !model) return;
-    if (!PROVIDER_ID.test(provider) || !MODEL_ID.test(model)) return;
+    if (!PROVIDER_ID.test(provider) || !CODEX_MODEL_ID.test(model)) return;
     // A local provider may serve an official slug: keep its row provider-qualified.
     if (
       provider === OFFICIAL_CODEX_PROVIDER &&

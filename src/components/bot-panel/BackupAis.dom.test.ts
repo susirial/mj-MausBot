@@ -128,7 +128,7 @@ describe("a bot's backup AIs in Simple", () => {
     render(full);
     expect(host.querySelectorAll("[data-backup]")).toHaveLength(MAX_BACKUPS);
     expect(host.querySelector("[data-panel-action=backup-add]")).toBeNull();
-    expect(host.querySelector("[data-backup]")?.textContent).toContain("Unavailable");
+    expect(host.querySelector("[data-backup]")?.textContent).toContain("Its AI account was removed");
   });
 
   it("offers the bot's own account too, without its own model, and says it shares the usage limit", async () => {

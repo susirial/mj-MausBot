@@ -662,7 +662,7 @@ describe("the model picker in Simple mode", () => {
   it("says so when there is no provider at all, and still names the bot's model", () => {
     fixture.instances = [];
     const opened = open(bot());
-    expect(list(opened).current).toMatchObject({ label: "claude-opus-5-5", meta: "Unavailable", warning: true });
+    expect(list(opened).current).toMatchObject({ label: "claude-opus-5-5", meta: "Its AI account was removed", warning: true, missing: true });
     expect(menu(opened.html)).toContain("No model providers are available.");
     expect(menu(opened.html)).toContain("Manage AI accounts");
   });
