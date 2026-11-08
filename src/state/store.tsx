@@ -457,6 +457,8 @@ export function configStatusFromFrame(frame: ConfigStatusFrame): ConfigStatus {
 export type { EngineInstall } from "./engine-install";
 
 export interface InstanceInfo extends InstanceEndpointInfo {
+  engineEndpoint?: import("../../shared/engine-endpoint").EndpointInfo;
+  independentEndpoint?: boolean;
   instanceId: string;
   driverKind: string;
   displayName: string;

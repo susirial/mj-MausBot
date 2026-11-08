@@ -314,6 +314,8 @@ export interface ProviderAdapter {
    * A driver that cannot read an attached image refuses the whole steer. */
   steer?(threadId: ThreadId, text: string, images?: readonly TurnImageInput[]): Promise<SteerOutcome>;
   hasSession(threadId: ThreadId): boolean;
+  /** Retire one isolated native session after a connection check, leaving other threads running. */
+  closeSession?(threadId: ThreadId): Promise<void>;
   /** The local process running this thread's engine, while there is one: a long tool call's own processes are under it. */
   enginePid?(threadId: ThreadId): number | undefined;
   stopAll(): Promise<void>;
@@ -546,6 +548,8 @@ export interface SmallModelFallback {
 
 export interface ProviderInstance {
   readonly instanceId: InstanceId;
+  /** Runtime revision of an explicitly configured independent API connection. */
+  readonly endpointRevision?: number;
   readonly driverKind: DriverKind;
   readonly displayName: string | undefined;
   readonly enabled: boolean;

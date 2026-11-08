@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ModelCatalog, SmallModelFallback, TextGenerationOptions, TextGenerationUsage } from "../contracts.ts";
+import type { EffortLevel, ModelCatalog, SmallModelFallback, TextGenerationOptions, TextGenerationUsage } from "../contracts.ts";
 import type { killCliTree, spawnCli } from "../procs.ts";
 import { refusesModel } from "../quick-model-fallback.ts";
 import { decodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "./codex-catalog.ts";
@@ -69,10 +69,13 @@ export interface CodexBackgroundArgsInput {
   model: string;
   modelProvider?: string | null;
   providerArgs: readonly string[];
+  /** Null omits reasoning for endpoint models without confirmed support. Undefined keeps the account policy. */
+  effort?: EffortLevel | null;
   cwd: string;
 }
 
 export function codexBackgroundArgs(input: CodexBackgroundArgsInput): string[] {
+  const effort = input.effort === undefined ? CODEX_BACKGROUND_EFFORT : input.effort;
   return [
     "exec",
     "--json",
@@ -82,7 +85,7 @@ export function codexBackgroundArgs(input: CodexBackgroundArgsInput): string[] {
     "--sandbox", "read-only",
     "--cd", input.cwd,
     "--model", input.model,
-    "-c", `model_reasoning_effort=${JSON.stringify(CODEX_BACKGROUND_EFFORT)}`,
+    ...(effort ? ["-c", `model_reasoning_effort=${JSON.stringify(effort)}`] : []),
     "-c", 'approval_policy="never"',
     "-c", 'web_search="disabled"',
     ...(input.modelProvider ? ["-c", `model_provider=${JSON.stringify(input.modelProvider)}`] : []),
@@ -104,6 +107,7 @@ export interface CodexOneShotInput {
   model: string;
   modelProvider?: string | null;
   providerArgs: readonly string[];
+  effort?: EffortLevel | null;
   options?: TextGenerationOptions;
   timeoutMs?: number;
   describeError?: (message: string) => string;
@@ -115,7 +119,7 @@ export async function runCodexOneShot(input: CodexOneShotInput): Promise<string>
   const cwd = mkdtempSync(join(tmpdir(), "omb-codex-background-"));
   try {
     return await new Promise<string>((resolve, reject) => {
-      const argv = codexBackgroundArgs({ model: input.model, modelProvider: input.modelProvider, providerArgs: input.providerArgs, cwd });
+      const argv = codexBackgroundArgs({ model: input.model, modelProvider: input.modelProvider, providerArgs: input.providerArgs, effort: input.effort, cwd });
       const child = input.spawn(input.cli, argv, { cwd, env: input.env, stdio: ["pipe", "pipe", "pipe"], botWork: true });
       const describe = input.describeError ?? ((message: string) => message.slice(0, 400));
       let settled = false;

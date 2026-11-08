@@ -54,6 +54,7 @@ const ENTRY_POINTS = [
   "mcp-gate.ts",
   "mcp-remote-proxy.ts",
   "harness-mcp-proxy.ts",
+  "endpoint-check-tool.ts",
   "drivers/agents-proxy.ts",
   "drivers/dweb-proxy.ts",
   "drivers/phone-proxy.ts",

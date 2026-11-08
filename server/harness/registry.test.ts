@@ -13,6 +13,24 @@ import { makeFakeDriver } from "../testing/fake-driver.ts";
 import { ENGINE_LIST_REUSE_MS, ProviderRegistry, SNAPSHOT_DEADLINE_MS, SNAPSHOT_REUSE_MS } from "./registry.ts";
 
 describe("ProviderRegistry", () => {
+  it("quarantines an endpoint whose old process cannot stop until a retry confirms disposal", async () => {
+    const fake = makeFakeDriver();
+    const registry = new ProviderRegistry([fake.driver]);
+    await registry.load({ a: { driver: "fake" }, b: { driver: "fake" } });
+    const old = registry.get("a");
+    if (!old) throw new Error("fixture missing");
+    let stopped = false;
+    old.dispose = async () => { if (!stopped) throw new Error("fixture stop failed"); };
+    const entry = { driver: "fake", displayName: "Endpoint A" };
+    await expect(registry.replaceEndpoint("a", entry)).resolves.toMatchObject({ state: "unavailable" });
+    expect(registry.get("a")).toBeNull();
+    expect((await registry.describe()).find(row => row.instanceId === "a")?.snapshot.state).toBe("unavailable");
+    expect(registry.get("b")).not.toBeNull();
+    stopped = true;
+    await expect(registry.replaceEndpoint("a", entry)).resolves.toMatchObject({ state: "loaded" });
+    expect(registry.get("a")).not.toBeNull();
+    await registry.disposeAll();
+  });
   it("creates live instances for known drivers", async () => {
     const fake = makeFakeDriver();
     const registry = new ProviderRegistry([fake.driver]);

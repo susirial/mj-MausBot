@@ -39,9 +39,31 @@ import { threadsOnOwnModel } from "../../shared/thread-model";
 import { ThreadModelsLine } from "./ThreadModelsLine";
 import { USAGE_WARN_WIDENS, UsageBars, UsageMenuRows } from "./EngineUsage";
 import { Select } from "./Select";
+import { ENDPOINT_STATUS_COPY, endpointEffortLevels, endpointModelStatus, endpointServiceLabel } from "@/lib/engine-connection-status";
 
 const COMPACT_MODEL_COUNT = 5;
 
+function endpointPickerInstance(instance: InstanceInfo): InstanceInfo {
+  const endpoint = instance.engineEndpoint;
+  if (!endpoint) return instance.independentEndpoint ? {
+    ...instance, access: "api", authentication: undefined, claudeAccount: undefined,
+    snapshot: { ...instance.snapshot, authenticated: undefined, chatgptPlan: undefined, account: undefined },
+    models: { default: "", options: [] },
+  } : instance;
+  const { authenticated: _authenticated, chatgptPlan: _plan, account: _account, ...snapshot } = instance.snapshot;
+  return {
+    ...instance, access: "api", authentication: undefined, claudeAccount: undefined,
+    capabilities: instance.capabilities ? { ...instance.capabilities, modelVariants: false } : undefined,
+    displayName: `${endpointServiceLabel(instance)} · ${instance.displayName}`, snapshot,
+    models: {
+      default: endpoint.catalog.default,
+      options: endpoint.catalog.options.map((model) => ({
+        id: model.id, label: model.label,
+        provider: t(ENDPOINT_STATUS_COPY[endpointModelStatus(instance, model.id).kind]),
+      })),
+    },
+  };
+}
 
 export function effortLabel(level: EffortLevel): string {
   return t(`model.effort.${level}` as Parameters<typeof t>[0]);
@@ -69,10 +91,12 @@ export function EffortRow({
   const { state, dispatch } = useStore();
   const selection = bot.modelSelection;
   const instance = state.instances.find((candidate) => candidate.instanceId === selection.instanceId);
-  if (instance?.capabilities?.modelVariants) {
+  if (!instance?.engineEndpoint && instance?.capabilities?.modelVariants) {
     return <ModelVariantRow bot={bot} threadId={threadId} updateBotDefault={updateBotDefault} className={className} label={label} compact={compact} quiet={compact} />;
   }
-  const levels = instance?.capabilities?.effortLevels;
+  const levels = instance?.engineEndpoint
+    ? endpointEffortLevels(instance, selection.model)
+    : instance?.capabilities?.effortLevels;
   if (!levels?.length) return null;
 
   if (compact) return (
@@ -290,7 +314,7 @@ export function ModelPicker({
 
   const selection = bot.modelSelection;
   const refocusAfterPick = useRefocusAfterPick(menuRef, open, selection, query);
-  const instances = withTypedModels(state.instances, selection, query);
+  const instances = withTypedModels(state.instances.map(endpointPickerInstance), selection, query);
   const active = instances.find((instance) => instance.instanceId === selection.instanceId);
   const pickerInstances = configuredModelInstances(instances, selection.instanceId);
   const selectedVariantLabel = selection.variant === undefined ? undefined : variantLabel(
@@ -302,8 +326,8 @@ export function ModelPicker({
   const openaiAccounts = pickerInstances.filter((instance) => signInFamily(instance) === "openai");
   const openaiRailInstance = openaiAccounts.find((instance) => instance.instanceId === lastOpenaiIdRef.current)
     ?? openaiAccounts.find((instance) => instance.instanceId === selection.instanceId) ?? openaiAccounts[0];
-  const multipleClaudeAccounts = state.instances.filter(isClaudeAccount).length > 1;
-  const showActiveAccount = (multipleClaudeAccounts && isClaudeAccount(active)) || Boolean(active?.snapshot.chatgptPlan);
+  const multipleClaudeAccounts = instances.filter(isClaudeAccount).length > 1;
+  const showActiveAccount = (multipleClaudeAccounts && isClaudeAccount(active)) || Boolean(active?.snapshot.chatgptPlan || active?.engineEndpoint);
   const claudeRailInstance = claudeAccounts.find((instance) => instance.instanceId === lastClaudeIdRef.current)
     ?? claudeAccounts.find((instance) => instance.instanceId === selection.instanceId) ?? claudeAccounts[0];
   const railInstance =
@@ -373,6 +397,7 @@ export function ModelPicker({
   };
 
   const lookForLocal = (instance: InstanceInfo) => {
+    if (instance.engineEndpoint) return;
     if (needsCli(instance) || instance.policy || probing.has(instance.instanceId)) return;
     setProbing((current) => new Set(current).add(instance.instanceId));
     void probeLocalModels(instance.instanceId, refreshInstanceModels).then(() => setProbing((current) => {
@@ -464,8 +489,14 @@ export function ModelPicker({
 
   const pick = (instance: InstanceInfo, model: string, variant?: string) => {
     if (bot.busy || instance.policy) return;
+    if (instance.engineEndpoint && !endpointModelStatus(instance, model).canSelect) return;
     const nextSelection = modelSelectionForPick(selection, instance, model);
-    if (variant !== undefined) nextSelection.variant = variant;
+    if (instance.engineEndpoint && nextSelection.effort
+      && !endpointEffortLevels(instance, model).includes(nextSelection.effort)) {
+      delete nextSelection.effort;
+    }
+    if (instance.engineEndpoint) delete nextSelection.variant;
+    else if (variant !== undefined) nextSelection.variant = variant;
     const updateBotDefault = !threadId || (simpleView ? simpleUpdatesBotDefault : scope === "bot");
     const targets = [currentTaskBot(profile, threadId ?? bot.threadId), ...(updateBotDefault ? [profile] : [])];
     if (targets.some((target) => modelSwitchNeedsAsk(approvalModeFor(target),
@@ -486,7 +517,9 @@ export function ModelPicker({
     if (updateBotDefault && threadId) setChangedBotModel(true);
     // A model with reasoning levels keeps the menu open, so its level can be set next without opening it again;
     // picking a variant row already sets that level.
-    if (variant !== undefined || contained || !offersReasoning(state, instance, nextSelection, threadId ?? bot.threadId)) close(true);
+    if (variant !== undefined || contained || (instance.engineEndpoint
+      ? !endpointEffortLevels(instance, model).length
+      : !offersReasoning(state, instance, nextSelection, threadId ?? bot.threadId))) close(true);
     else refocusAfterPick();
   };
 
@@ -508,7 +541,9 @@ export function ModelPicker({
   const filteredCustom = filterCustomModels(custom, query);
   const { pinned, rest } = partitionCustomModels(filteredCustom);
   const blocked = railInstance
-    ? pane === "custom"
+    ? railInstance.engineEndpoint
+      ? !endpointModelStatus(railInstance, railInstance.engineEndpoint.catalog.default, { state: "unverified" }).canSelect
+      : pane === "custom"
       ? needsCli(railInstance)
       : needsCli(railInstance) || needsSignIn(railInstance)
     : false;
@@ -523,14 +558,16 @@ export function ModelPicker({
   );
   const remote = window.ogb?.remoteClient?.active === true;
 
-  const levels = active?.capabilities?.effortLevels ?? [];
+  const levels = active?.engineEndpoint
+    ? endpointEffortLevels(active, selection.model)
+    : active?.capabilities?.effortLevels ?? [];
   const writeEffort = (effort: EffortLevel | undefined) => {
     const { effort: _effort, ...model } = selection;
     dispatch({ type: "setModel", botId: bot.id, threadId, ...(threadId && simpleUpdatesBotDefault ? { updateBotDefault: true } : {}),
       selection: effort ? { ...model, effort } : model });
   };
   const thinking: SimpleThinking | null = contained ? null
-    : variantChoices(state, selection, threadId ?? bot.threadId) ? {
+    : !active?.engineEndpoint && variantChoices(state, selection, threadId ?? bot.threadId) ? {
       variants: (
         <ModelVariantRow compact quiet bot={shown} threadId={threadId} updateBotDefault={Boolean(threadId) && simpleUpdatesBotDefault} className="px-2 py-1"
           label={<span className="shrink-0 text-[12px] font-medium leading-4 text-ink-tertiary">{t("botSettings.simple.thinking")}</span>} />
@@ -541,7 +578,16 @@ export function ModelPicker({
 
   const botModelSelection = follows !== undefined && profile.modelSelection.instanceId === railInstance?.instanceId
     ? profile.modelSelection : undefined;
-  const renderRow = (option: ModelChoice) => (
+  const renderRow = (option: ModelChoice) => railInstance?.engineEndpoint ? (
+    <button key={option.id} type="button" data-menu-row data-endpoint-model={option.id}
+      disabled={!endpointModelStatus(railInstance, option.id).canSelect}
+      aria-pressed={selection.instanceId === railInstance.instanceId && selection.model === option.id}
+      onClick={() => pick(railInstance, option.id)}
+      className={MENU_ROW}>
+      <span className="min-w-0 flex-1 truncate">{option.label}</span>
+      <span className="max-w-[55%] truncate text-[11px] text-ink-secondary">{option.provider}</span>
+    </button>
+  ) : (
     <ModelRow
       key={option.id}
       option={option}
@@ -567,11 +613,12 @@ export function ModelPicker({
 
   const currentOption = active?.models.options.find((option) => option.id === selection.model);
   const attention = !active ? undefined
+    : active.engineEndpoint ? t(ENDPOINT_STATUS_COPY[endpointModelStatus(active, selection.model).kind])
     : active.policy ? t("policy.managedBy", { organization: active.policy.organizationName })
       : needsCli(active) ? t("model.setupRequired")
         : needsSignIn(active) && !isCustomOnly(active) && !currentOption?.custom ? t("model.signInRequired") : currentOption?.orgBlocked ? t("model.orgBlocked") : undefined;
   const summary = active
-    ? `${engineDisplayName(active)} · ${modelLabel(active, selection.model)}${
+    ? `${engineDisplayName(active)} · ${modelLabel(active, selection.model)}${active.engineEndpoint ? ` · ${attention}` : ""}${
         modelProvider(active, selection.model) ? ` · ${modelProvider(active, selection.model)}` : ""
       }${selectedVariantLabel ? ` · ${selectedVariantLabel}` : selection.effort
         ? ` · ${t(advanced ? "model.effort.summary" : "model.simple.thinkingSummary", { level: effortLabel(selection.effort) })}` : ""}`
@@ -664,7 +711,8 @@ export function ModelPicker({
           : <span className="size-3.5 rounded-full bg-ink/[0.08]" aria-hidden="true" />}
         {attention && <span data-model-attention className="absolute -bottom-0.5 -right-0.5 size-1.5 rounded-full bg-warning ring-[1.5px] ring-app" />}
       </span>
-      <span className="min-w-0 max-w-[160px] truncate">{modelName(active, selection.model)}</span>
+      <span className="min-w-0 max-w-[160px] truncate">{active?.engineEndpoint
+        ? `${endpointServiceLabel(active)} · ${modelName(active, selection.model)}` : modelName(active, selection.model)}</span>
       {selection.variant !== undefined && <span className="shrink-0 whitespace-pre">{variantSuffix(active, selection.model, selection.variant)}</span>}
       <UsageBars engine={selection.instanceId} className="ml-1.5" />
       <ChevronDown size={12} strokeWidth={2} aria-hidden="true" className="ml-1 shrink-0 text-ink-tertiary group-hover:text-ink-secondary" />
@@ -682,6 +730,21 @@ export function ModelPicker({
     loading: loadingInstances,
     refreshing: refreshingId,
   }) : null;
+  if (simpleMenu) {
+    simpleMenu.groups = simpleMenu.groups.map((group) => {
+      if (!group.instance.engineEndpoint) return group;
+      return {
+        ...group,
+        body: group.body.kind === "models" ? { ...group.body, rows: group.body.rows.map((row) => ({
+          ...row, route: t(ENDPOINT_STATUS_COPY[endpointModelStatus(group.instance, row.model ?? row.option.id).kind]),
+          blocked: !endpointModelStatus(group.instance, row.model ?? row.option.id).canSelect,
+        })) } : group.body,
+      };
+    });
+    if (simpleMenu.current?.instance?.engineEndpoint) {
+      simpleMenu.current.meta = t(ENDPOINT_STATUS_COPY[endpointModelStatus(simpleMenu.current.instance, selection.model).kind]);
+    }
+  }
 
   const fullPane = (
     <>
@@ -748,7 +811,9 @@ export function ModelPicker({
                         blocked ? "bg-warning/10 text-warning" : "bg-success/10 text-success",
                       )}
                     >
-                      {pane === "custom" && !blocked && railInstance.access !== "api" ? t("model.localModels") : engineStatus(railInstance)}
+                      {railInstance.engineEndpoint ? t(ENDPOINT_STATUS_COPY[endpointModelStatus(railInstance,
+                        railInstance.instanceId === selection.instanceId ? selection.model : railInstance.engineEndpoint.catalog.default).kind])
+                        : pane === "custom" && !blocked && railInstance.access !== "api" ? t("model.localModels") : engineStatus(railInstance)}
                     </span>
                   </div>
                 </div>
@@ -758,13 +823,13 @@ export function ModelPicker({
                 {signInFamily(railInstance) === "openai" && openaiAccounts.length > 1 && (
                   <ClaudeAccountSelect accounts={openaiAccounts} selectedId={railInstance.instanceId} onSelect={selectRail} />
                 )}
-                <InstanceAccountNotes instance={railInstance} listsModels={pane === "main"} />
+                {!railInstance.engineEndpoint && <InstanceAccountNotes instance={railInstance} listsModels={pane === "main"} />}
                 {railInstance.snapshot.chatgptPlan && railInstance.snapshot.authenticated && (
                   <ChatGptPlanStatus key={railInstance.instanceId} instanceId={railInstance.instanceId} />
                 )}
-                {railInstance.access === "api"
+                {!railInstance.engineEndpoint && (railInstance.access === "api"
                   ? <ApiKeyHint instance={railInstance} />
-                  : pane === "custom" && <div className="mt-0.5 text-[12px] leading-4 text-ink-tertiary">{t("model.localHint")}</div>}
+                  : pane === "custom" && <div className="mt-0.5 text-[12px] leading-4 text-ink-tertiary">{t("model.localHint")}</div>)}
               </div>
 
               {pane === "custom" && canReturnToOfficial && (
@@ -791,20 +856,22 @@ export function ModelPicker({
                 </div>
               ) : blocked ? (
                 <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 pt-1">
-                  <EngineSetup instance={railInstance} intent={pane === "custom" ? "inject" : "cloud"} quiet={!advanced} onHost={remote} />
+                  {railInstance.engineEndpoint
+                    ? <button type="button" className="ui-button" onClick={openEngines}>{t("settings.simple.ai.manage")}</button>
+                    : <EngineSetup instance={railInstance} intent={pane === "custom" ? "inject" : "cloud"} quiet={!advanced} onHost={remote} />}
                   {!remote && railInstance.claudeAccount && needsSignIn(railInstance) && pane !== "custom" && (
                     <p className="mt-2 px-1.5 text-[12px] leading-4 text-ink-tertiary">
                       {railInstance.claudeAccount.signInShell === "powershell" && `${t("engines.account.powershell")} `}
                       {t("engines.account.signInHint")}
                     </p>
                   )}
-                  <p className="mt-2 text-center text-[12px] leading-4 text-ink-tertiary">
+                  {!railInstance.engineEndpoint && <p className="mt-2 text-center text-[12px] leading-4 text-ink-tertiary">
                     {railInstance.snapshot.chatgptPlan ? t("engineSetup.chatgpt.modelsAfterSignIn") : pane === "main" && official.length > 0
                       ? official.length === 1
                         ? t("model.afterSetupOne")
                         : t("model.afterSetupMany", { count: official.length })
                       : t("model.localSoon")}
-                  </p>
+                  </p>}
                 </div>
               ) : (
                 <>
@@ -892,7 +959,7 @@ export function ModelPicker({
                 />
               )}
 
-              {pane === "main" && offersLocalModels(railInstance, custom.length) && (
+              {!railInstance.engineEndpoint && pane === "main" && offersLocalModels(railInstance, custom.length) && (
                 <button
                   type="button"
                   data-model-local-entry

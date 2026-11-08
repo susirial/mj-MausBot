@@ -14,6 +14,9 @@ import { homedir } from "node:os";
 import { codexConfigMcp, codexConfigRunsServer, mountedMcpServerName } from "./codex-mcp-names.ts";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
+import { ENDPOINT_API_KEY_ENV, endpointConnectionSchema, endpointModelCatalog } from "../engine-endpoints.ts";
+import { engineHomes } from "../engine-homes/engine-homes.ts";
+import { compileEndpointLaunch, isEndpointProtectedEnvName, prepareEndpointFiles, type EndpointLaunchInput } from "./endpoint-launch.ts";
 import { laterStartup, openStartupModelCatalog, unconfirmedModelCatalog, writeStartupModelCache } from "../startup-model-catalog.ts";
 import { hostedWorkspaceConfigured } from "../enterprise.ts";
 import { cloudHomeConfigured } from "../cloud-home.ts";
@@ -26,6 +29,7 @@ import { isReservedMcpEnvEntry } from "../mcp-registry.ts";
 
 import type {
   DriverCreateInput,
+  EffortLevel,
   McpServerSpec,
   ProviderDriver,
   ProviderInstance,
@@ -76,10 +80,14 @@ export interface CodexConfig {
   fullAuto: boolean;
   authMode?: "chatgpt-plan";
   managed?: { url: string; models: string[] };
+  endpoint?: Extract<ReturnType<typeof endpointConnectionSchema.parse>, { runtime: "codex" }>;
 }
 
 function decodeConfig(raw: unknown): CodexConfig {
   const o = (raw ?? {}) as Record<string, unknown>;
+  const endpoint = o.endpoint === undefined ? undefined : endpointConnectionSchema.parse(o.endpoint);
+  if (endpoint && endpoint.runtime !== "codex") throw new Error("Codex endpoint runtime must be codex.");
+  if (endpoint && (o.authMode !== undefined || o.managed !== undefined)) throw new Error("Endpoint, ChatGPT plan and Company billing cannot be combined.");
   if (o.authMode !== undefined && o.authMode !== "chatgpt-plan") throw new Error("Unknown Codex sign-in mode.");
   if (o.authMode && o.managed) throw new Error("ChatGPT plan and Company billing cannot be combined.");
   return {
@@ -87,6 +95,7 @@ function decodeConfig(raw: unknown): CodexConfig {
     fullAuto: o.fullAuto === true,
     ...(o.authMode === "chatgpt-plan" ? { authMode: "chatgpt-plan" as const } : {}),
     ...(o.managed && typeof o.managed === "object" ? { managed: decodeManagedCodex(o.managed) } : {}),
+    ...(endpoint ? { endpoint } : {}),
   };
 }
 
@@ -138,6 +147,7 @@ export function managedCodexArgs(config: NonNullable<CodexConfig["managed"]>): s
 const PRIVATE_ENV_FAMILIES = ["OMB_GATE_CONFIG_", "OMB_REMOTE_MCP_CONFIG_"];
 const PROXY_LITERAL_ENV = ["NODE_USE_ENV_PROXY", "NO_PROXY", "no_proxy"];
 const SHELL_ESSENTIALS = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TERM", "LANG", "TZ"]);
+const CODEX_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"] as const satisfies readonly EffortLevel[];
 
 const DENY_TIMEOUT_NOTE =
   "OpenMausBot: nobody answered this permission request in time. Skip this action and finish what you can without it.";
@@ -364,7 +374,8 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
   defaultConfig: () => decodeConfig({}),
 
   async create(input: DriverCreateInput<CodexConfig>): Promise<ProviderInstance> {
-    const { instanceId, config } = input;
+    const { instanceId } = input;
+    const config = input.config.endpoint === undefined ? input.config : decodeConfig(input.config);
     const plan = config.authMode === "chatgpt-plan";
     const planUnavailable = plan && (hostedWorkspaceConfigured() || cloudHomeConfigured())
       ? "ChatGPT plan sign-in for hosted Pro requires OpenAI's hosted-app approval. Use a Company model or API key until that integration is approved; the local desktop flow cannot be used here."
@@ -381,8 +392,43 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       delete env.OPENAI_API_KEY;
       stripWorkspaceCredentialEnv(env);
       delete env.OPENMAUSBOT_CHATGPT_TOKEN;
+      if (config.endpoint) {
+        for (const name of Object.keys(env)) {
+          if (isEndpointProtectedEnvName(name) || name.startsWith("ANTHROPIC_") || name.startsWith("CLAUDE_CODE_") ||
+              name === "OPENMAUSBOT_COMPANY_API_KEY") delete env[name];
+        }
+      }
       if (plan) env.CODEX_HOME = join(planDirectory, "codex");
       return env;
+    };
+    const readCliVersion = cliVersionProbe(config.cli);
+    const endpointInput = (selection: Pick<EndpointLaunchInput, "model" | "purpose" | "effort" | "cliVersion">): EndpointLaunchInput => {
+      if (!config.endpoint) throw new Error("This instance has no endpoint.");
+      const apiKey = input.environment[ENDPOINT_API_KEY_ENV];
+      if (!apiKey?.trim()) throw new Error("Endpoint API key is missing. Configure this connection in Settings.");
+      return {
+        dataDir: DATA_DIR, instanceId, audienceKey: engineHomes.scope() ?? undefined,
+        endpoint: config.endpoint, apiKey, supportedEffortLevels: CODEX_EFFORT_LEVELS, ...selection,
+      };
+    };
+    const endpointLaunch = async (selection: Pick<EndpointLaunchInput, "model" | "purpose" | "effort">) => {
+      const probe = await readCliVersion(childEnv());
+      if (!("version" in probe)) throw new Error(probe.reason);
+      const launchInput = endpointInput({ ...selection, cliVersion: probe.version ?? undefined });
+      const launch = compileEndpointLaunch(launchInput);
+      if (launch.runtime !== "codex") throw new Error("Codex endpoint runtime must be codex.");
+      await prepareEndpointFiles(launchInput);
+      const env = childEnv();
+      for (const [name, value] of Object.entries(launch.env)) {
+        if (isEndpointProtectedEnvName(name)) env[name] = value;
+      }
+      return { ...launch, env };
+    };
+    const userFailure = (raw: string, route: CodexRoute, info?: Parameters<typeof codexUserFailure>[2]): ReturnType<typeof codexUserFailure> => {
+      if (!config.endpoint) return codexUserFailure(raw, route, info);
+      return { message: raw.includes("provider_not_configured")
+        ? "provider_not_configured: Codex could not configure this API connection. Check its endpoint settings and CLI version."
+        : raw.slice(0, 400) };
     };
     const catalogEnv = childEnv();
     const planAuth = plan ? new ChatGptPlanAuthController({ directory: planDirectory }) : null;
@@ -390,8 +436,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     let planSigningOut = false;
     let disposed = false;
     let planWarning: string | undefined;
-    let models = plan ? { default: "", options: [] } : config.managed ? { default: config.managed.models[0], options: config.managed.models.map(id => ({ id, label: id })) } : STATIC_CODEX_MODELS;
+    let models = config.endpoint ? endpointModelCatalog(config.endpoint) : plan ? { default: "", options: [] } : config.managed ? { default: config.managed.models[0], options: config.managed.models.map(id => ({ id, label: id })) } : STATIC_CODEX_MODELS;
     const refreshModels = async (preserveExisting = false) => {
+      if (config.endpoint) { models = endpointModelCatalog(config.endpoint); return; }
       if (config.managed) return;
       if (planAuth) {
         const generation = planGeneration;
@@ -423,7 +470,9 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     // Codex's model list ships with the CLI: updating 0.155.1 to 0.162.1 in place adds gpt-6.1-sol.
     let modelsCliVersion: string | null = null;
     let startupModelRefresh: Promise<void> | null = null;
-    if (config.managed) {
+    if (config.endpoint) {
+      models = endpointModelCatalog(config.endpoint);
+    } else if (config.managed) {
       await refreshModels();
     } else {
       startupModelRefresh = (await openStartupModelCatalog({
@@ -439,7 +488,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     }
     // OpenAI can refuse Codex's own ChatGPT login while `codex login status` still reports it. Only a
     // stored ChatGPT login is marked: an API-key login cannot be fixed by a ChatGPT sign-in.
-    const ownLogin = !plan && !config.managed;
+    const ownLogin = !config.endpoint && !plan && !config.managed;
     const loginCheck = codexLoginCheck(config.cli);
     const loginMark = (): [string, string] | null => {
       const env = childEnv();
@@ -492,6 +541,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         if (disposed) throw new Error("This provider was removed. Select a connected account and send again.");
         if (planAuth && (planSigningOut || generation !== planGeneration)) throw new Error("The ChatGPT account changed while this message was preparing. Select a connected account and send again.");
       };
+      assertPlanCurrent();
+      const endpointTurn = config.endpoint ? await endpointLaunch({ model: turn.model ?? config.endpoint.catalog.default, purpose: "turn", effort: turn.effort }) : null;
+      if (endpointTurn && turn.images?.length && !config.endpoint?.catalog.options.find(model => model.id === endpointTurn.model)?.inputModalities.includes("image")) {
+        throw new Error("This connection's selected model does not support image input.");
+      }
       assertPlanCurrent();
       if (planUnavailable) throw new Error(planUnavailable);
       const planToken = planAuth ? await planAuth.accessToken() : undefined;
@@ -573,12 +627,12 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         return null;
       };
       const launchAttempt = async (attempt: number): Promise<void> => {
-        const env = childEnv();
+        const env = endpointTurn ? { ...endpointTurn.env } : childEnv();
         const launchedLogin = chatgptTurn ? storedCodexLogin(env) : null;
         if (planToken) env.OPENMAUSBOT_CHATGPT_TOKEN = planToken;
-        const appServerArgs = ["app-server", ...(plan ? chatgptPlanCodexArgs() : config.managed ? managedCodexArgs(config.managed) : codexSelectedProviderArgs(env, turn.model)), ...codexToolSurfaceArgs(),
+        const appServerArgs = ["app-server", ...(endpointTurn ? endpointTurn.providerArgs : plan ? chatgptPlanCodexArgs() : config.managed ? managedCodexArgs(config.managed) : codexSelectedProviderArgs(env, turn.model)), ...codexToolSurfaceArgs(),
           // Native shell snapshots can restore variables the shell policy removed.
-          ...(turn.toolScope === undefined ? [] : ["-c", "features.shell_snapshot=false"]),
+          ...(turn.toolScope === undefined && !endpointTurn ? [] : ["-c", "features.shell_snapshot=false"]),
           // A guest-driven turn: no shell, no file reads (-c wins over config files).
           ...(turn.guestConfined ? GUEST_CONFINED_CODEX_ARGS : [])];
         const baseEnv = new Map(Object.entries(env).filter(([, value]) => value !== undefined));
@@ -673,7 +727,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           ...mountedEnv.filter((name) => !PRIVATE_ENV_FAMILIES.some((family) => name.startsWith(family))).sort(),
         ])];
         // Records this turn writes never run without proof that shell snapshots are off.
-        const provenPrivateEnv = turn.toolScope !== undefined || directoryMounts.size > 0;
+        const provenPrivateEnv = Boolean(endpointTurn) || turn.toolScope !== undefined || directoryMounts.size > 0;
         if (privateEnv.length && turn.toolScope === undefined) appServerArgs.push("-c", "features.shell_snapshot=false");
 
         const selectionConfig: { config?: Record<string, unknown> } = turn.toolScope === undefined ? {} : { config: { mcp_servers: Object.fromEntries(
@@ -683,6 +737,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         ) } };
 
         const commandCwd = permissionLaunchCwd(turn.cwd ?? homedir());
+        if (endpointTurn?.effort) selectionConfig.config = { ...selectionConfig.config, model_reasoning_effort: endpointTurn.effort };
         const releaseSlot = tryCodexLaunchSlot() ?? await waitForLaunchSlot(attempt);
         if (!releaseSlot) return;
         const child = spawnHoldingSlot(releaseSlot, () => spawnCli(...codexLaunch(config.cli, appServerArgs), {
@@ -1031,7 +1086,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           (state.authRecovery && !/\b403\b|forbidden/i.test(raw) && /\b401\b|unauthorized/i.test(raw)));
         if (retryLoginRace(raw, refused)) return;
         if (refused) loginRefused(); else if (chatgptTurn && CODEX_MISSING_CREDENTIALS.test(raw)) loginCheck.forget();
-        const reported: ReturnType<typeof codexUserFailure> = refused ? { message: codexSignInExpired(raw) } : codexUserFailure(raw, route, error.codexErrorInfo);
+        const reported: ReturnType<typeof codexUserFailure> = refused ? { message: codexSignInExpired(raw) } : userFailure(raw, route, error.codexErrorInfo);
         const setup = refused || classifyError({ text: raw }).reason === "auth";
         if (reported.message === state.lastError && (state.lastErrorSetup || !setup)) return;
         state.lastError = reported.message;
@@ -1354,19 +1409,19 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
               : "Could not read Codex configuration; cannot safely update bot instructions. Retry after checking Codex.",
           );
         }
-        if (privateEnv.length) {
+        if (privateEnv.length || endpointTurn) {
           const snapshot = (effectiveConfig as { features?: { shell_snapshot?: unknown } } | null)?.features?.shell_snapshot;
           if (provenPrivateEnv ? snapshot !== false : snapshot === true) {
             throw new Error("Codex could not disable inherited shell snapshots. No prompt was sent.");
           }
         }
-        if (privateEnv.length || plan) {
+        if (privateEnv.length || plan || endpointTurn) {
           const rawPolicy = (effectiveConfig as { shell_environment_policy?: unknown } | null)?.shell_environment_policy;
           if (rawPolicy !== undefined && (!rawPolicy || typeof rawPolicy !== "object" || Array.isArray(rawPolicy))) {
             throw new Error("Codex could not confirm its shell environment policy. No prompt was sent.");
           }
           selectionConfig.config = { ...selectionConfig.config,
-            ...extendShellExclusions((rawPolicy ?? {}) as Record<string, unknown>, [...(plan ? ["OPENMAUSBOT_CHATGPT_TOKEN"] : []), ...privateEnv]) };
+            ...extendShellExclusions((rawPolicy ?? {}) as Record<string, unknown>, [...(endpointTurn ? [ENDPOINT_API_KEY_ENV] : []), ...(plan ? ["OPENMAUSBOT_CHATGPT_TOKEN"] : []), ...privateEnv]) };
         }
         if (turn.toolScope !== undefined) {
           const catalog = (effectiveConfig as { mcp_servers?: unknown } | null)?.mcp_servers;
@@ -1407,7 +1462,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // Codex's `never` means "do not ask to escalate", not "grant every requested permission":
         // only Full may synthesize approvals.
         autoAcceptPermissions = approvalMode === "full";
-        const selection = config.managed
+        const selection = endpointTurn ? { model: endpointTurn.model, modelProvider: endpointTurn.modelProvider } : config.managed
           ? { model: turn.model, modelProvider: "openmaus_company" }
           : config.authMode === "chatgpt-plan"
             ? { model: turn.model, modelProvider: "openai_chatgpt_plan" }
@@ -1516,7 +1571,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
             ...(turn.guestConfined ? { environments: [] } : {}),
             // Spread, not `effort ?? null`: codex-cli 0.146.0 treats null as absent (the thread keeps
             // its effort), rejects "", and thread/start takes no effort, so a thread keeps its last level.
-            ...(turn.effort ? { effort: turn.effort } : {}),
+            ...((endpointTurn ? endpointTurn.effort : turn.effort) ? { effort: endpointTurn ? endpointTurn.effort : turn.effort } : {}),
           });
         };
         const waitNames = supportsMcpStartup(initialized?.userAgent) ? enabledMcpMounts([...selectedMcp.keys(), ...directMounts], effectiveConfig, turn.toolScope !== undefined) : [];
@@ -1537,7 +1592,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         const raw = e instanceof Error ? e.message : String(e);
         const refused = chatgptTurn && loginMark() !== null && codexSignInRefused({ message: raw });
         hideRefusedModel(raw);
-        const reported: ReturnType<typeof codexUserFailure> = refused ? { message: codexSignInExpired(raw) } : codexUserFailure(raw, route);
+        const reported: ReturnType<typeof codexUserFailure> = refused ? { message: codexSignInExpired(raw) } : userFailure(raw, route);
         const needsAuth = refused || /(?:\b401\b|unauthorized|missing bearer|authentication required)/i.test(raw);
         const verdict = classifyError(failure);
         if (!state.settled && !abandoned && !recoveredMissingSession && !stopRequested && !needsAuth && codexTurnId === null && earlyNotifications.length === 0 && verdict.transient && attempt < RETRY_MAX_ATTEMPTS - 1 && state.sawStreamDelta === false) {
@@ -1559,13 +1614,25 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     return { turnId };
   };
 
-  const readCliVersion = cliVersionProbe(config.cli);
   const snapshot = async (): Promise<ProviderSnapshot> => {
     if (planUnavailable) return { state: "unavailable", authenticated: false, chatgptPlan: true, reason: planUnavailable, authenticationUnavailableReason: planUnavailable };
     const env = childEnv();
     const probe = await readCliVersion(env);
     if (!("version" in probe)) return { state: "unavailable", reason: probe.reason, ...(plan ? { chatgptPlan: true } : {}) };
     const { version } = probe;
+    if (config.endpoint) {
+      const keyConfigured = Boolean(input.environment[ENDPOINT_API_KEY_ENV]?.trim());
+      let reason: string | undefined;
+      try {
+        compileEndpointLaunch(endpointInput({ model: config.endpoint.catalog.default, purpose: "turn", cliVersion: version ?? undefined }));
+      } catch (error) { reason = error instanceof Error ? error.message : "Invalid endpoint configuration."; }
+      return {
+        state: reason ? "unavailable" : "available", version, authenticated: keyConfigured,
+        billing: "metered", account: { method: "api-key" },
+        authenticationUnavailableReason: "API connections use their configured key, not official sign-in.",
+        ...(reason ? { reason } : {}),
+      };
+    }
     if (planAuth) return { state: "available", version, chatgptPlan: true, billing: "subscription", ...await planAuth.snapshot(), update: await codexReleaseUpdate(version, config.cli),
       ...(planWarning ? { warning: { title: "Check ChatGPT connection", message: planWarning } } : {}) };
     if (config.managed) return { state: "available", version, authenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY && input.environment.CODEX_HOME), billing: "metered" };
@@ -1593,6 +1660,15 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
   const generateMemoryText = async (prompt: string, options: TextGenerationOptions = {}): Promise<string> => {
     if (startupModelRefresh) await startupModelRefresh;
     if (disposed) throw new Error("This provider was removed.");
+    if (config.endpoint) {
+      const launch = await endpointLaunch({ model: options.model ?? config.endpoint.backgroundModel, purpose: options.model ? "check" : "background" });
+      if (disposed) throw new Error("This provider was removed.");
+      return runCodexOneShot({
+        spawn: spawnCli, kill: killCliTree, cli: config.cli, env: launch.env, prompt, options,
+        model: launch.model, modelProvider: launch.modelProvider, providerArgs: [...launch.providerArgs, "-c", 'web_search="disabled"'],
+        effort: launch.effort ?? null, describeError: (message) => userFailure(message, "other").message,
+      });
+    }
     if (planUnavailable) throw new Error(planUnavailable);
     const env = childEnv();
     let providerArgs: string[] = [];
@@ -1640,6 +1716,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     ...(startupModelRefresh ? { startupModelRefresh } : {}),
     generateMemoryText,
     ...(plan ? { authenticationMethod: "browser-pkce" as const } : {}),
+    ...(config.endpoint ? {} : {
     startAuthentication: async () => {
       if (planUnavailable) throw new Error(planUnavailable);
       if (planSigningOut || disposed) throw new Error("This account is being disconnected. Wait before signing in again.");
@@ -1672,6 +1749,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         planWarning = (error as Error).message;
       } finally { planSigningOut = false; }
     },
+    }),
     snapshot,
     adapter: {
       provider: DRIVER_KIND,
@@ -1689,7 +1767,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         dataMcp: true, emailMcp: true, deviceMcp: true,
         images: true,
         nativeImageInput: true,
-        effortLevels: ["low", "medium", "high", "xhigh", "max"],
+        effortLevels: CODEX_EFFORT_LEVELS,
         strictResume: true,
       },
       sendTurn,

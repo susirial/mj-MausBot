@@ -24,6 +24,14 @@ const claude = {
 };
 
 describe("new bot default model selection", () => {
+  it("requires explicit selection before a new independent connection becomes the default", () => {
+    const endpoint = withInstanceConfig([{ ...codex, instanceId: "endpoint-a", access: "custom" as const }],
+      { "endpoint-a": { driver: "codex", config: { endpoint: { version: 1 } } } });
+    expect(selectDefaultModelSelection(endpoint)).toEqual({ instanceId: "", model: "" });
+    expect(selectDefaultModelSelection([...endpoint, claude])).toEqual({ instanceId: "claude", model: "claude-default" });
+    const preferred = { instanceId: "endpoint-a", model: "selected-model" };
+    expect(selectDefaultModelSelection(endpoint, preferred)).toEqual(preferred);
+  });
   it("accepts a configured API-key provider", () => {
     const instance = { ...codex, instanceId: "mistral", driverKind: "mistral", access: "api" as const };
     const preferred = { instanceId: "mistral", model: "selected-model" };
@@ -371,4 +379,3 @@ describe("a hidden provider", () => {
     expect(withInstanceConfig(instances, { hermes: { driver: "fake" } }).map((instance) => instance.instanceId)).toEqual(["claude", "hermes"]);
   });
 });
-

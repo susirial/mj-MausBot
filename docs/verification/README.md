@@ -81,6 +81,7 @@ Use only mapped, tested commands:
 - [Question cards: a teammate's question, in its chat and the person's inbox](question-cards.md)
 - [Chief authority over additional departments](team-access.md)
 - [Engines and Doctor](engines.md)
+- [Independent Codex and Claude Code API connections](engine-endpoints.md)
 - [Cline engine and native loopback qualification](cline.md)
 - [Claude coordination and turn-scoped tools](claude-tool-lifecycle.md)
 - [Codex bot instructions](codex-instructions.md)

@@ -381,6 +381,12 @@ if (argv[0] === "auth" && argv[1] === "status") {
   );
 }
 
+if (process.env.FAKE_CLAUDE_ENDPOINT === "1" && argv[0] !== "auth") {
+  const { runFakeEndpointCli } = await import("./fake-engine-endpoint.ts");
+  await runFakeEndpointCli("claude");
+  process.exit(process.exitCode ?? 0);
+}
+
 if (["text", "json"].includes(argAfter("--output-format") ?? "")) {
   const prompt = await new Promise<string>((resolve) => {
     let input = "";

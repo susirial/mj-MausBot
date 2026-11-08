@@ -9,12 +9,15 @@ import { join, dirname, isAbsolute, normalize } from "node:path";
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
 import { openStartupModelCatalog, unconfirmedModelCatalog, writeStartupModelCache } from "../startup-model-catalog.ts";
 import { writeFileAtomicIfChanged } from "../atomic.ts";
+import { addHeldSecretScrubber, HELD_SECRET_MASK, redactSecretsInText } from "../redact.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { cliVersionProbe } from "../cli-version-probe.ts";
 import { claudeAuthStatus } from "./claude-auth-status.ts";
 import { projectMcpServers } from "./claude-project-mcp.ts";
-import { botSettingsFor, withBotSettings } from "./claude-bot-settings.ts";
+import { botSettingsFor, isClaudeEndpointProtectedEnv, withBotSettings } from "./claude-bot-settings.ts";
+import { ENDPOINT_API_KEY_ENV, endpointConnectionSchema, endpointModelCatalog as connectionModelCatalog, type EndpointConnection } from "../engine-endpoints.ts";
+import { compileEndpointLaunch, prepareEndpointFiles } from "./endpoint-launch.ts";
 import { claudeBilling, claudeCallUsage } from "./claude-billing.ts";
 import { claudeAuthFailure, claudeAuthRecovery } from "./claude-auth-recovery.ts";
 import { CLAUDE_MODEL_ID, STATIC_CLAUDE_MODELS, claudeModelExtras, endpointModelCatalog } from "./claude-model-extras.ts";
@@ -26,6 +29,7 @@ import { ClaudeLoginController } from "./claude-login-auth.ts";
 
 import type {
   DriverCreateInput,
+  EffortLevel,
   ProviderDriver,
   ProviderInstance,
   ProviderSnapshot,
@@ -261,6 +265,10 @@ export function claudeCliUpdate(version: string | null, cli: string): ProviderSn
 const DRIVER_KIND = "claudeAgent";
 
 const NO_ANTHROPIC_KEY = "No Anthropic API key — open Settings → API keys.";
+const NO_ENDPOINT_KEY = "No endpoint API key configured. Edit this connection in Settings.";
+// Claude Code 2.1.319 help advertises these five levels; earlier endpoint versions are not qualified.
+const ENDPOINT_EFFORT_CONFIRMED_VERSION: ClaudeCliVersion = [2, 1, 319];
+const ENDPOINT_EFFORT_LEVELS: readonly EffortLevel[] = ["low", "medium", "high", "xhigh", "max"];
 
 export interface ClaudeConfig {
   cli: string;
@@ -269,6 +277,7 @@ export interface ClaudeConfig {
   managedModels?: string[];
   /** A custom endpoint's own models: the whole catalog, first one the default. No Claude model is offered. */
   endpointModels?: string[];
+  endpoint?: Extract<EndpointConnection, { runtime: "claude" }>;
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
   tools?: string[];
   disallowedTools?: string[];
@@ -623,6 +632,10 @@ function decodeToolList(value: unknown, field: "tools" | "disallowedTools"): str
 
 function decodeConfig(raw: unknown): ClaudeConfig {
   const o = (raw ?? {}) as Record<string, unknown>;
+  const endpoint = Object.hasOwn(o, "endpoint") ? endpointConnectionSchema.parse(o.endpoint) : null;
+  if (endpoint && (endpoint.runtime !== "claude" || o.managed === true || o.managedModels !== undefined || o.endpointModels !== undefined)) {
+    throw new Error("claude: endpoint runtime must be Claude and cannot use managed or legacy endpoint settings.");
+  }
   const mode = o.permissionMode;
   if (mode !== undefined && mode !== "acceptEdits" && mode !== "auto" && mode !== "bypassPermissions") {
     throw new Error(`claude: invalid permissionMode ${JSON.stringify(mode)}`);
@@ -640,6 +653,7 @@ function decodeConfig(raw: unknown): ClaudeConfig {
     ...(o.managed === true ? { managed: true } : {}),
     ...(o.managedModels ? { managedModels: o.managedModels as string[] } : {}),
     ...(o.endpointModels ? { endpointModels: o.endpointModels as string[] } : {}),
+    ...(endpoint?.runtime === "claude" ? { endpoint } : {}),
     permissionMode: (mode as ClaudeConfig["permissionMode"]) ?? "acceptEdits",
     ...(tools !== undefined ? { tools } : {}),
     ...(disallowedTools !== undefined ? { disallowedTools } : {}),
@@ -774,17 +788,48 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
 
   async create(input: DriverCreateInput<ClaudeConfig>): Promise<ProviderInstance> {
     const { instanceId, config } = input;
-    const environment = (model?: string | null) =>
-      claudeEnvironment(config.managed ? undefined : model, { ...process.env, ...input.environment }, config.configDir, input.environment);
+    let cliVersion: ClaudeCliVersion | null = null;
+    const endpointInput = (model: string, purpose: "turn" | "background" | "check", effort?: EffortLevel) => {
+      if (!config.endpoint) throw new Error("claude: endpoint configuration required.");
+      const apiKey = input.environment[ENDPOINT_API_KEY_ENV];
+      if (!apiKey?.trim()) throw new Error(NO_ENDPOINT_KEY);
+      return { dataDir: DATA_DIR, instanceId, audienceKey: engineHomes.scope() ?? undefined,
+        endpoint: config.endpoint, apiKey, model, purpose, effort,
+        cliVersion: cliVersion?.join("."), supportedEffortLevels: cliVersion && versionAtLeast(cliVersion, ENDPOINT_EFFORT_CONFIRMED_VERSION)
+          ? ENDPOINT_EFFORT_LEVELS : [] };
+    };
+    const endpointLaunch = (model: string, purpose: "turn" | "background" | "check", effort?: EffortLevel) => {
+      const launch = compileEndpointLaunch(endpointInput(model, purpose, effort));
+      if (launch.runtime !== "claude") throw new Error("claude: endpoint runtime mismatch.");
+      return launch;
+    };
+    const environment = (model?: string | null, purpose: "turn" | "background" | "check" = "turn", effort?: EffortLevel): NodeJS.ProcessEnv => {
+      if (!config.endpoint) return claudeEnvironment(config.managed ? undefined : model, { ...process.env, ...input.environment }, config.configDir, input.environment);
+      const launch = input.environment[ENDPOINT_API_KEY_ENV]?.trim()
+        ? endpointLaunch(model ?? config.endpoint.catalog.default, purpose, effort) : null;
+      const env: NodeJS.ProcessEnv = { ...(launch?.env ?? process.env), ...input.environment, PATH: augmentedPath(),
+        BASH_MAX_TIMEOUT_MS: "600000", NPM_CONFIG_LOGLEVEL: "error" };
+      for (const key of Object.keys(env)) {
+        if (isClaudeEndpointProtectedEnv(key) || ["OPENAI_API_KEY", "OPENAI_BASE_URL", "CODEX_HOME", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"].includes(key.toUpperCase())) delete env[key];
+      }
+      stripWorkspaceCredentialEnv(env);
+      for (const [key, value] of Object.entries(launch?.env ?? {})) {
+        if (isClaudeEndpointProtectedEnv(key) && ![ENDPOINT_API_KEY_ENV, "OMB_CLAUDE_AUTOCOMPACT", "OMB_CLAUDE_INHERIT_USER_CONFIG"].includes(key.toUpperCase())) env[key] = value;
+      }
+      return env;
+    };
     const catalogEnv = environment();
+    const endpointApiKey = config.endpoint ? input.environment[ENDPOINT_API_KEY_ENV] : undefined;
+    const releaseEndpointSecret = endpointApiKey
+      ? addHeldSecretScrubber(text => text.split(endpointApiKey).join(HELD_SECRET_MASK)) : undefined;
     if (inheritsUserConfig(catalogEnv)) {
       console.error(`claude (${instanceId}): OMB_CLAUDE_INHERIT_USER_CONFIG=1 — bots inherit this machine's Claude Code MCP servers, skills, hooks and CLAUDE.md on every turn; remove it unless a bot needs a user-scope server`);
     }
     let models = config.managedModels ? { default: config.managedModels[0], options: config.managedModels.map(id => ({ id, label: id })) }
-      : endpointModelCatalog(config.endpointModels) ?? STATIC_CLAUDE_MODELS;
+      : config.endpoint ? connectionModelCatalog(config.endpoint) : endpointModelCatalog(config.endpointModels) ?? STATIC_CLAUDE_MODELS;
     const orgBlocks = createOrgModelBlocks(() => engineHomes.everyHome(catalogEnv), (blocked) => { models = withOrgBlocks(models, blocked); });
     const refreshModels = async () => {
-      if (config.managed || config.endpointModels) return;
+      if (config.managed || config.endpointModels || config.endpoint) return;
       try {
         const resolved = await mergeLocalInject(readClaudeModelCatalog(catalogEnv), catalogEnv);
         if (resolved.options.length) models = resolved; else unconfirmedModelCatalog(models);
@@ -792,14 +837,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       } catch { unconfirmedModelCatalog(models); }
       try { writeStartupModelCache(instanceId, models); } catch {}
     };
-    const startupModelRefresh = config.managed || config.endpointModels ? null : (await openStartupModelCatalog({
+    const startupModelRefresh = config.managed || config.endpointModels || config.endpoint ? null : (await openStartupModelCatalog({
       instanceId,
       use: (catalog) => { models = catalog; },
       current: () => models,
       refresh: refreshModels,
     }))?.pending ?? null;
 
-    let cliVersion: ClaudeCliVersion | null = null;
     let cliVersionChecked = false;
     // Whether `claude --help` lists --autocompact: 2.1.129 rejects it despite the floor.
     let cliHasAutocompact: boolean | null = null;
@@ -951,7 +995,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       await session.closed;
       return sessions.get(threadId) !== session;
     }, (threadId) => active.has(threadId));
-    const emit = (event: RuntimeEvent) => authRecovery.emit(event);
+    const emit = (event: RuntimeEvent) => authRecovery.emit(config.endpoint && event.type === "runtime.error"
+      ? { ...event, message: redactSecretsInText(event.message) } : event);
     const base = (threadId: string, turnId: string) => ({
       eventId: newEventId(),
       provider: DRIVER_KIND,
@@ -965,7 +1010,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (startupModelRefresh) await startupModelRefresh;
       turn = { ...turn, toolScope: assertToolScopeSupported(DRIVER_KIND, turn.toolScope) };
       if (config.managedModels && (!turn.model || !config.managedModels.includes(turn.model))) throw new Error("This model is not assigned to this workspace.");
-      if (config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) throw new Error(NO_ANTHROPIC_KEY);
+      if (config.endpoint && !input.environment[ENDPOINT_API_KEY_ENV]?.trim()) throw new Error(NO_ENDPOINT_KEY);
+      if (!config.endpoint && config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) throw new Error(NO_ANTHROPIC_KEY);
       if (config.managed && (!turn.model || turn.model.includes("::") || !config.configDir ||
           !input.environment.ANTHROPIC_API_KEY || !input.environment.ANTHROPIC_BASE_URL)) {
         throw new Error("Company model access is unavailable. Reconnect your organization; personal billing will not be used.");
@@ -1018,6 +1064,18 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       else if (config.tools !== undefined) args.push("--tools", config.tools.join(","));
       const turnEnvironment = environment();
       await ensureCliVersion(turnEnvironment);
+      if (config.endpoint && (!cliVersion || !claudeCliSupports(cliVersion, "--setting-sources"))) {
+        throw new Error("Claude endpoint isolation requires an identifiable CLI supporting --setting-sources.");
+      }
+      if (config.endpoint?.autoCompactTokens !== undefined && cliVersion && cliVersion.join(".") !== cliHelpVersion) {
+        await readCliHelp(cliVersion.join("."), turnEnvironment);
+      }
+      const connection = config.endpoint ? endpointLaunch(turn.model ?? config.endpoint.catalog.default, "turn", turn.effort) : null;
+      if (connection && turn.images?.length &&
+          !config.endpoint?.catalog.options.find(option => option.id === connection.model)?.inputModalities.includes("image")) {
+        throw new Error("The selected endpoint model does not support images.");
+      }
+      if (connection) await prepareEndpointFiles(endpointInput(connection.model, "turn", turn.effort));
       if (turn.guestConfined && !claudeCliSupports(cliVersion, "--restricted")) {
         throw new Error(withWhy("This Claude Code is too old to run this turn without a shell. Update Claude Code.", turn.confinedWhy));
       }
@@ -1032,10 +1090,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (isolated) {
         // Without these every turn gets this machine's MCP servers, connectors, skills, hooks and CLAUDE.md (one desktop: 407 tools, ~10k tokens).
         if (!turn.mcpFromUserConfig && claudeCliSupports(cliVersion, "--strict-mcp-config")) args.push("--strict-mcp-config");
-        if (claudeCliSupports(cliVersion, "--setting-sources")) args.push("--setting-sources", "project");
+        if (claudeCliSupports(cliVersion, "--setting-sources")) args.push("--setting-sources", config.endpoint ? "" : "project");
         if (turn.userSkillsDir) args.push("--add-dir", turn.userSkillsDir);
       }
-      const compactWindow = autoCompactWindow(turnEnvironment);
+      const compactWindow = connection ? (connection.autoCompactTokens === undefined ? null : String(connection.autoCompactTokens)) : autoCompactWindow(turnEnvironment);
       if (compactWindow && cliHasAutocompact === true) {
         args.push("--autocompact", compactWindow);
       }
@@ -1043,10 +1101,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       if (cliVersionChecked && claudeCliSupports(cliVersion, "--system-prompt-snapshot")) {
         args.push("--system-prompt-snapshot", "off");
       }
-      const turnModel = config.managed ? turn.model : await resolveClaudeTurnModel(turn.model, turnEnvironment, config.endpointModels);
-      const injected = config.managed || config.endpointModels ? { model: turnModel ?? null, injected: false } : applyClaudeInject({ ...turnEnvironment }, turnModel);
+      const turnModel = connection?.model ?? (config.managed ? turn.model : await resolveClaudeTurnModel(turn.model, turnEnvironment, config.endpointModels));
+      const injected = config.managed || config.endpointModels || config.endpoint ? { model: turnModel ?? null, injected: false } : applyClaudeInject({ ...turnEnvironment }, turnModel);
       if (injected.model) args.push("--model", injected.model);
-      if (turn.effort) args.push("--effort", turn.effort);
+      const effort = connection ? connection.effort : turn.effort;
+      if (effort) args.push("--effort", effort);
 
       // Off argv: Windows' CreateProcess limit (spawn ENAMETOOLONG), and the prompt may be sensitive.
       let systemPromptPath: string | null = null;
@@ -1142,8 +1201,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         args.push("--allowedTools", allowed.join(","));
       }
 
-      const env = environment(config.endpointModels ? undefined : turnModel);
-      const authSettings = isolated && !injected.injected
+      const env = environment(config.endpointModels ? undefined : turnModel, "turn", turn.effort);
+      const authSettings = !config.endpoint && isolated && !injected.injected
         ? readClaudeAuthSettings(env, input.environment) : {};
       // The hook helper reads its bearer from a per-thread file refreshed every turn, so a
       // long-lived CLI process never presents a stale token.
@@ -1168,8 +1227,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       // Approvals and browser credentials expire at the turn boundary; native background workers must not outlive it.
       env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS = "1";
       // Never for a guest: --restricted leaves project settings out, and a hook is a command.
-      const botSettings = turn.guestConfined ? {} : botSettingsFor(turn.botSettingsFile, cwd, env);
-      const settings = withBotSettings(botSettings, own);
+      const projectSettings = config.endpoint && !turn.guestConfined
+        ? botSettingsFor(join(cwd, ".claude", "settings.json"), cwd, env, { endpoint: true, project: true }) : {};
+      const botSettings = turn.guestConfined ? {} : botSettingsFor(turn.botSettingsFile, cwd, env, { endpoint: Boolean(config.endpoint) });
+      const settings = withBotSettings(withBotSettings(projectSettings, botSettings), connection
+        ? withBotSettings(own, connection.settings) : own);
       const authSettingsPath = mcpConfigPath && Object.keys(settings).length
         ? join(dirname(mcpConfigPath), "auth-settings.json") : null;
       if (authSettingsPath) args.push("--settings", authSettingsPath);
@@ -1187,6 +1249,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         hooks: Boolean(hooks),
         toolSearch,
         botSettings: createHash("sha256").update(JSON.stringify(botSettings)).digest("hex"),
+        ...(connection ? { endpointRevision: config.endpoint?.revision,
+          endpointSettings: createHash("sha256").update(JSON.stringify(settings)).digest("hex") } : {}),
         // Rotating an account's key/helper must not reuse the old process.
         auth: createHash("sha256").update(JSON.stringify({
           settings: authSettings,
@@ -1434,7 +1498,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         } catch {
           return;
         }
-        authRecovery.frame(threadId, o, session.costTotal);
+        if (!config.endpoint) authRecovery.frame(threadId, o, session.costTotal);
         // A replayed stdin message carries its images again: keep their bytes out of the log.
         appendNative(threadId, { dir: "in", source: "claude.sdk.message", msg: o?.type === "user" && o.isReplay === true && o.message ? diagnosticClaudeUserMessage(o) : o });
         if (session.elicit.frame(o)) return;
@@ -1510,7 +1574,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             // Signed out, the CLI answers with an api-error frame whose only content is "run /login".
             if (claudeAuthFailure(o, text)) {
               if (session.turn) session.turn.authFailed = session.turn.explained = true;
-              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: text, setup: true });
+              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: config.endpoint
+                ? `Endpoint credentials were rejected. Edit this connection's API key. ${redactSecretsInText(text)}` : text,
+                ...(config.endpoint ? {} : { setup: true }) });
               break;
             }
             if (claudeUsageLimit(o, text, Boolean(session.turn?.limit))) {
@@ -1524,7 +1590,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
             }
             if ((o.is_api_error_message === true || typeof o.error === "string") && text.trim()) {
               if (session.turn) session.turn.explained = true;
-              if (!session.turn?.stopRequested) emit({ ...base(threadId, currentTurnId()), type: "runtime.error", ...claudeApiError(o, text) });
+              if (!session.turn?.stopRequested) emit({ ...base(threadId, currentTurnId()), type: "runtime.error",
+                ...(config.endpoint ? { message: redactSecretsInText(`${typeof o.error === "string" ? `${o.error}: ` : ""}${text}`) }
+                  : claudeApiError(o, text)) });
               break;
             }
             if (text.trim()) {
@@ -1597,7 +1665,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 o.api_error === "usage_limit_reached" || USAGE_LIMIT.test(String(o.result ?? "")))) reachLimit(o, o.result);
             if (o.is_error === true && session.turn && !session.turn.settled && !session.turn.explained && !session.turn.stopRequested) {
               session.turn.explained = true;
-              emit({ ...base(threadId, currentTurnId()), type: "runtime.error", message: claudeResultError(o) });
+              emit({ ...base(threadId, currentTurnId()), type: "runtime.error",
+                message: config.endpoint && typeof o.result === "string" && o.result.trim()
+                  ? redactSecretsInText(o.result) : claudeResultError(o) });
             }
             if (!config.managed) void orgBlocks.refresh();
             // result.usage is per turn "in streaming-input sessions" (2.1.282) even on a retained
@@ -1893,6 +1963,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const s = sessions.get(threadId);
       if (!s || !s.turn || s.turn.settled || s.closing || s.child.exitCode !== null) return "refused";
       const turn = s.turn;
+      const endpoint = config.endpoint;
+      if (endpoint && images?.length && !endpoint.catalog.options
+        .find(option => option.id === (turn.input.model ?? endpoint.catalog.default))?.inputModalities.includes("image")) return "refused";
       let message: ClaudeUserMessage;
       try {
         message = claudeUserMessage(text, images);
@@ -1914,15 +1987,20 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     let lastAuth: Awaited<ReturnType<typeof claudeAuthStatus>> = {};
 
     const snapshot = async (): Promise<ProviderSnapshot> => {
+      if (config.endpoint && !input.environment[ENDPOINT_API_KEY_ENV]?.trim()) return { state: "unavailable", reason: NO_ENDPOINT_KEY };
       const env = environment();
       const probe = await readCliVersion(env);
       if (!("version" in probe)) return { state: "unavailable", reason: probe.reason };
       const { version } = probe;
       cliVersion = parseClaudeCliVersion(version);
       cliVersionChecked = true;
+      if (config.endpoint && (!cliVersion || !claudeCliSupports(cliVersion, "--setting-sources"))) {
+        return { state: "unavailable", version, reason: "Claude endpoint isolation requires an identifiable CLI supporting --setting-sources." };
+      }
       if (version !== cliHelpVersion) await readCliHelp(version, env);
       const update = claudeCliUpdate(version, config.cli);
       const warning = claudeInheritWarning(env);
+      if (config.endpoint) return { state: "available", version, ...(update ? { update } : {}) };
       if (config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) return { state: "unavailable", version, reason: NO_ANTHROPIC_KEY };
       const probed: typeof lastAuth = config.requireApiKey ? { authenticated: true } : await claudeAuthStatus(config.cli, env);
       const auth = probed.authenticated === undefined ? lastAuth : (lastAuth = probed);
@@ -1931,15 +2009,30 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
 
     /** One-shot call, prompt on stdin (approval summaries can hold secrets), no tools or MCP servers. */
     const generateReview = async (prompt: string, signal?: AbortSignal, onUsage?: TextGenerationOptions["onUsage"], timeoutMs?: number, named?: string): Promise<string> => {
+      if (config.endpoint && !input.environment[ENDPOINT_API_KEY_ENV]?.trim()) throw new Error(NO_ENDPOINT_KEY);
       await ensureCliVersion(environment());
+      if (config.endpoint && (!cliVersion || !claudeCliSupports(cliVersion, "--setting-sources"))) {
+        throw new Error("Claude endpoint isolation requires an identifiable CLI supporting --setting-sources.");
+      }
+      if (config.endpoint?.autoCompactTokens !== undefined && cliVersion && cliVersion.join(".") !== cliHelpVersion) {
+        await readCliHelp(cliVersion.join("."), environment());
+      }
+      if (config.endpoint && named && !config.endpoint.catalog.options.some(option => option.id === named)) {
+        throw new Error("This model is not configured for this endpoint.");
+      }
+      const purpose = named ? "check" : "background";
+      const connection = config.endpoint ? endpointLaunch(named ?? config.endpoint.backgroundModel, purpose) : null;
+      if (connection) await prepareEndpointFiles(endpointInput(connection.model, purpose));
       return new Promise((resolve, reject) => {
-        if (config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) {
+        if (!config.endpoint && config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) {
           reject(new Error(NO_ANTHROPIC_KEY));
           return;
         }
-        const model = named ?? config.managedModels?.[0] ?? config.endpointModels?.[0] ?? "claude-haiku-5-5";
-        const env = environment(config.endpointModels ? undefined : model);
-        const args = backgroundCallArgs({ model, outputFormat: onUsage ? "json" : "text", supports: (flag) => cliVersion !== null && claudeCliSupports(cliVersion, flag), isolated: !inheritsUserConfig(env) });
+        const model = connection?.model ?? named ?? config.managedModels?.[0] ?? config.endpointModels?.[0] ?? "claude-haiku-5-5";
+        const env = environment(config.endpointModels ? undefined : model, purpose);
+        const args = backgroundCallArgs({ model, outputFormat: onUsage ? "json" : "text", supports: (flag) => cliVersion !== null && claudeCliSupports(cliVersion, flag), isolated: !inheritsUserConfig(env),
+          ...(connection ? { endpoint: { settings: connection.settings, effort: connection.effort,
+            ...(cliHasAutocompact === true ? { autoCompactTokens: connection.autoCompactTokens } : {}) } } : {}) });
         const { child, removeCwd } = spawnBackgroundCall(config.cli, args, env);
         let stdout = "";
         let stderr = "";
@@ -1950,7 +2043,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           removeCwd();
-          if (error) reject(error);
+          if (error) reject(config.endpoint ? new Error(redactSecretsInText(error.message)) : error);
           else resolve(stdout.trim());
         };
         const onAbort = () => {
@@ -2024,11 +2117,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       refreshModels,
       ...(startupModelRefresh ? { startupModelRefresh } : {}),
       snapshot,
-      startAuthentication: () => login.start(),
-      getAuthentication: (flowId) => login.get(flowId),
-      completeAuthentication: (flowId, code) => login.complete(flowId, code),
-      cancelAuthentication: () => login.cancel(),
-      signOut: () => login.signOut(),
+      ...(!config.endpoint ? {
+        startAuthentication: () => login.start(),
+        getAuthentication: (flowId: string) => login.get(flowId),
+        completeAuthentication: (flowId: string, code: string) => login.complete(flowId, code),
+        cancelAuthentication: () => login.cancel(),
+        signOut: () => login.signOut(),
+      } : {}),
       adapter: {
         provider: DRIVER_KIND,
         capabilities: {
@@ -2054,7 +2149,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           localComputerMcp: true,
           hooks: true, askTool: { kind: "mcp", server: "ogb", name: "ask_user" },
         },
-        sendTurn: (turn) => authRecovery.send(turn, sendTurn),
+        sendTurn: (turn) => config.endpoint ? sendTurn(turn) : authRecovery.send(turn, sendTurn),
         steer,
         interruptTurn: async (threadId) => active.get(threadId)?.stop(),
         respondToRequest: async (threadId, requestId, decision) => {
@@ -2068,6 +2163,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           return behavior === "allow" ? "allowed-once" : behavior === "answer" ? "answered" : "rejected";
         },
         hasSession: (threadId) => active.has(threadId),
+        ...(config.endpoint ? { closeSession: async (threadId: string) => {
+          const session = sessions.get(threadId);
+          if (!session) return;
+          closeSession(threadId, "connection check completed");
+          if (!await killCliTree(session.child)) throw new Error("The previous Claude process could not be stopped.");
+          await session.finishClose?.();
+          await session.closed;
+        } } : {}),
         enginePid: (threadId) => (active.has(threadId) ? sessions.get(threadId)?.child.pid : undefined),
         cacheKeepWarm: forks.adapter,
         stopAll: async () => {
@@ -2088,6 +2191,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
           for (const { stop } of active.values()) stop();
           for (const threadId of Array.from(sessions.keys())) closeSession(threadId, "dispose");
           listeners.clear();
+          if (config.endpoint) {
+            await Promise.all(Array.from(sessions.values(), async session => {
+              if (!await killCliTree(session.child)) throw new Error("The previous Claude process could not be stopped.");
+              await session.finishClose?.();
+              await session.closed;
+            }));
+            releaseEndpointSecret?.();
+          }
         }
       },
     };

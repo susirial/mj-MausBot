@@ -1109,6 +1109,7 @@ export function instanceOwnsRouting(
   const config = typeof entry.config === "object" && entry.config !== null && !Array.isArray(entry.config)
     ? entry.config as Record<string, unknown>
     : {};
+  if (config.endpoint !== undefined) return true;
   const own = (value: unknown) => typeof value === "string" && value.trim() !== "";
   const ownUrl = (...workspace: Array<string | undefined>) => own(config.url)
     && !workspace.some((url) => url !== undefined && sameUrl(config.url as string, url));

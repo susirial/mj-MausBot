@@ -3,6 +3,7 @@
 
 /** Workspace credential env names; spawned engine CLIs must never inherit them. */
 export const WORKSPACE_CREDENTIAL_ENV = [
+  "OPENMAUSBOT_ENDPOINT_API_KEY",
   "XAI_API_KEY",
   "MISTRAL_API_KEY",
   "CEREBRAS_API_KEY",
@@ -59,6 +60,7 @@ export function stripWorkspaceCredentialEnv(env: Record<string, string | undefin
 
 /** Env a provider CLI may read as its billing identity; a foreign key must never move a subscription CLI onto API billing. */
 export const PROVIDER_CREDENTIAL_ENV = [
+  "OPENMAUSBOT_ENDPOINT_API_KEY",
   "CLINE_API_KEY",
   "ANTHROPIC_API_KEY",
   "FACTORY_API_KEY",

@@ -27,6 +27,20 @@ afterEach(() => {
 });
 
 describe("engine homes at run time", () => {
+  it("keeps a prepared endpoint directory private without importing official sign-ins", () => {
+    const homes = new EngineHomes();
+    homes.start(setup());
+    const bob = audienceHome(dataDir, "member:p_bob");
+    const directory = join(bob, "providers", "endpoint-a", "claude");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "settings.json"), '{"env":{"ANTHROPIC_MODEL":"fixture-model"}}');
+    const homed = homes.within("t-bob", () => homes.forSpawn({
+      HOME: home, OPENMAUSBOT_ENDPOINT_INSTANCE_ID: "endpoint-a", CLAUDE_CONFIG_DIR: directory,
+    }));
+    expect(homed?.env.CLAUDE_CONFIG_DIR).toBe(directory);
+    expect(homed?.shared).toEqual([]);
+    expect(existsSync(join(bob, ".claude", ".credentials.json"))).toBe(false);
+  });
   it("change nothing off a Team Cloud: no home for any spawn, and adapters are not wrapped", () => {
     const homes = new EngineHomes();
     expect(homes.within("t-bob", () => homes.forSpawn({ HOME: home }))).toBeNull();

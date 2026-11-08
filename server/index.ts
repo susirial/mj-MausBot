@@ -620,6 +620,12 @@ import { createAntigravityLeftoverRoutes } from "./routes/antigravity-leftovers.
 import { createAntigravityAccountRoutes } from "./routes/antigravity-accounts.ts";
 import { createConfigRoutes } from "./routes/config.ts";
 import { createInstanceRoutes } from "./routes/instances.ts";
+import { createEngineEndpointRoutes } from "./routes/engine-endpoints.ts";
+import { endpointFromConfig, isEngineEndpoint, publicEndpointInfo } from "./engine-endpoints.ts";
+import { endpointActivity } from "./endpoint-activity.ts";
+import { persistEndpointInstances, type EndpointCommit } from "./endpoint-persistence.ts";
+import { EngineEndpointChecks } from "./engine-endpoint-check.ts";
+import { effectiveEndpointResumeCursor, endpointResumeMatches } from "./endpoint-session-revision.ts";
 import { createMcpConfig } from "./host/mcp-config.ts";
 import { createMcpServerRoutes } from "./routes/mcp-servers.ts";
 import { teamAdminSummary } from "./cloud-team-admin.ts";
@@ -779,6 +785,14 @@ let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
 const cfg = loadConfig();
+addHeldSecretScrubber(text => {
+  let scrubbed = text;
+  for (const entry of Object.values(cfg.instances ?? {})) {
+    const key = entry.environment?.OPENMAUSBOT_ENDPOINT_API_KEY;
+    if (key) scrubbed = scrubbed.replaceAll(key, "••••••");
+  }
+  return scrubbed;
+});
 const hostedModels = hostedModelPolicy(DATA_DIR);
 const providerConfigs = () => hostedModels ? hostedModels.configs() : instanceConfigs(cfg);
 const decorateHostedProvider = hostedModels ? (instance: ProviderInstance) => hostedModels.decorate(instance) : undefined;
@@ -6437,7 +6451,13 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "session.started":
       if (bot && event.sessionId && event.providerInstanceId) {
-        store.setResumeCursor(bot.id, event.providerInstanceId, event.sessionId, event.threadId);
+        const running = runningTurnEngines.get(event.threadId);
+        if (running?.endpointRevision !== undefined) {
+          if (registry.get(event.providerInstanceId) === running &&
+              endpointFromConfig(cfg.instances?.[event.providerInstanceId]?.config)?.revision === running.endpointRevision) {
+            store.setEndpointResumeCursor(event.threadId, event.providerInstanceId, { cursor: event.sessionId, revision: running.endpointRevision });
+          }
+        } else store.setResumeCursor(bot.id, event.providerInstanceId, event.sessionId, event.threadId);
       }
       if (typeof event.model === "string" && event.model) sessionModelByThread.set(event.threadId, event.model); if (bot && event.mcpFailed?.length) mcpServersHost.health.engineFailed(bot.id, event.mcpFailed); const reconnecting = event.mcpFailed?.length && (bot ?? speaker) ? retryBrokeredMcp({ botId: bot?.id ?? speaker!.botId, threadId: event.threadId }, event.mcpFailed) : []; if (reconnecting.length) pushMessage({ role: "bot", kind: "activity", tool: { name: mcpReconnectLine(reconnecting, threadLanguage(event.threadId)), ok: false } });
       break;
@@ -7632,6 +7652,7 @@ async function beginTurn(
   }
   const policyRefusal = policyModelRefusal(instance);
   if (policyRefusal) throw Object.assign(new Error(policyRefusal), { status: 409, code: "managed_policy" });
+  const endpointRevision = instance.endpointRevision;
   const toolScope = toolScopeForTurn(bot.id);
   guestDrivenTurns.delete(threadId);
   const guestConfined = cloudGuestDriven(threadId) || cloudGuestDrivenHandoff(opts?.coordination?.id) || botApiThread(threadId);
@@ -7843,18 +7864,21 @@ async function beginTurn(
       const externalContextMarker = isExternalContextMarker(task.lastInstanceId)
         ? task.lastInstanceId
         : undefined;
+      const endpointContextChanged = endpointRevision !== undefined && !endpointResumeMatches(task, instanceId, endpointRevision);
       const fresh =
+        endpointContextChanged ||
         !rewound &&
         !externalContextMarker &&
         engineIsFresh({ instanceId, lastInstanceId: task.lastInstanceId, resumeCursors: task.resumeCursors, transcript: replayable });
       const strictResume = instance.adapter.capabilities.strictResume === true;
-      const cursor = task.resumeCursors[instanceId];
+      const cursor = endpointRevision === undefined ? task.resumeCursors[instanceId] : effectiveEndpointResumeCursor(task, instanceId, endpointRevision);
       const handed = strictResume && !rewound && !contextReset && !fresh && !externalContextMarker && cursor !== undefined
         ? task.handedMessages?.[instanceId] : undefined;
       const unseen = handed && handedStateUsable(handed, cursor, contextOrder) ? unseenMessages(replayable, contextOrder, handed) : undefined;
       const externalUpdate = Boolean(opts?.coordination?.resumed || unseen?.some((m) => m.keep));
       // What a resumed session keeps from its launch; Codex reasserts model and provider on resume, but an in-flight turn and an omitted effort keep the prior selection.
       const persistentConfig = [bot.name, bot.title, bot.description, sectionContextSystemPrompt(bot.section),
+        ...(endpointRevision === undefined ? [] : [endpointRevision]),
         ...(instance.driverKind === "codex" ? [model, effort ?? null] : [])];
       const sessionConfig = (soul: string | undefined) =>
         createHash("sha256").update(JSON.stringify([...persistentConfig, soul])).digest("hex").slice(0, 16);
@@ -7886,7 +7910,7 @@ async function beginTurn(
           replaysNatively: replaysNatively(instance.driverKind),
         });
         // Snapshot the cursor now: an external result can clear it during async setup.
-        const resumeCursor = resume ? task.resumeCursors[instanceId] : undefined;
+        const resumeCursor = resume ? (endpointRevision === undefined ? task.resumeCursors[instanceId] : effectiveEndpointResumeCursor(task, instanceId, endpointRevision)) : undefined;
         // The driver may fall back to one fresh session when the provider no longer honours the cursor; this is what it sends there.
         const recoveryIsReplay = resumeCursor !== undefined && externalUpdate && transcript.length > 0;
         const recoveryText = resumeCursor === undefined ? undefined : recoveryIsReplay
@@ -8439,6 +8463,10 @@ async function beginTurn(
       });
       if (!directTurnClaimIsCurrent(bot.id, dispatchClaimId, threadId)) {
         throw new DirectTurnSetupCancelled("turn stopped before dispatch");
+      }
+      if (endpointRevision !== undefined && (providerInstancesChanging.has(instanceId) || registry.get(instanceId) !== instance ||
+          endpointFromConfig(cfg.instances?.[instanceId]?.config)?.revision !== endpointRevision)) {
+        throw new DirectTurnSetupCancelled("connection changed before dispatch");
       }
       runningTurnEngines.set(threadId, instance);
       // Re-decide from the soul actually sent, except on an unattended continuation wake, so a session started under an old soul never survives a soul change by laundering its record.
@@ -10353,7 +10381,8 @@ async function runClaimedGroupMemberTurn(
     const roomSession = roomSessions.dispatch({
       threadId, botId: readyBot.id, claimId: internalGeneration, instance, guestConfined: roomGuestConfined, reset: Boolean(roomReset), hooks: Boolean(integrations.hooks),
       context: () => ({ ...roomMemberContexts.forThread(threadId)?.[readyBot.id], compactAt: nativeCompactTokens(instance) }),
-      config: [roomSystem.stable, cwd, readyBot.modelSelection, turnApprovalMode, roomToolScope, roomUserMcp, integrations],
+      config: [roomSystem.stable, cwd, readyBot.modelSelection, turnApprovalMode, roomToolScope, roomUserMcp, integrations,
+        ...(instance.endpointRevision === undefined ? [] : [instance.endpointRevision])],
       window: roomWindow, tail: roomTail, wrap: (body) => withTurnClock(clock, withRecalled(roomRecalled, attachmentsForBox(body, cwd) + roomShareNote.text + devsReports.note(threadId, Boolean(integrations.agents)))),
     });
     guardTurnDispatch(roomShareNote.after(instance.adapter.sendTurn({
@@ -11885,6 +11914,18 @@ async function describeInstances() {
       ...instanceIcon(entry),
       ...(entry?.access ? { access: entry.access } : {}), ...(entry?.driver === "openai-compat" && typeof (entry.config as { replyWaitMinutes?: unknown } | undefined)?.replyWaitMinutes === "number" ? { replyWaitMinutes: (entry.config as { replyWaitMinutes: number }).replyWaitMinutes } : {}), ...(heldKeys?.refusal(instance.instanceId) ? { snapshot: { state: "unavailable" as const, reason: TRIAL_KEY_HELD } } : {}),
     };
+    if (entry && isEngineEndpoint(entry)) {
+      let endpoint: ReturnType<typeof publicEndpointInfo>;
+      try { endpoint = publicEndpointInfo(entry); }
+      catch {
+        return { ...described, independentEndpoint: true, authentication: undefined,
+          install: { ...described.install, signInCommand: undefined } };
+      }
+      const checks = engineEndpointChecks.info(instance.instanceId, endpoint.revision, "version" in described.snapshot ? described.snapshot.version : undefined);
+      return { ...described, engineEndpoint: { ...endpoint, checks, check: checks[checks.length - 1] ?? { state: "unverified" as const } },
+        authentication: undefined, install: { ...described.install, signInCommand: undefined },
+        ...(hostedModels || managedDesktop.owns(instance.instanceId) ? { readOnly: true } : {}) };
+    }
     if (hostedModels) return { ...described, readOnly: true,
       install: undefined, authentication: undefined, cli: undefined, cliCandidates: [],
     };
@@ -11968,6 +12009,15 @@ async function stopCompanyInstances(ids: string[]) {
 }
 
 async function persistProviderInstance(instanceId: string, instances: NonNullable<AppConfig["instances"]>) {
+  if (isEngineEndpoint(cfg.instances?.[instanceId])) {
+    if (instances[instanceId]) {
+      await persistIndependentEndpoints([instanceId], instances, false);
+      return;
+    }
+    endpointActivity.block(instanceId);
+    revokeEngineCapabilities(new Set([instanceId]));
+    engineEndpointChecks.clear(instanceId);
+  }
   saveConfig({ instances }, { replaceInstances: true });
   cfg.instances = instances;
   providerAuthSessions.clearInstance(instanceId);
@@ -11980,6 +12030,46 @@ async function persistProviderInstance(instanceId: string, instances: NonNullabl
     await registry.dispose(instanceId);
   }
   resetPathCache();
+}
+
+const engineEndpointChecks = new EngineEndpointChecks();
+
+function independentEndpointBusy(instanceId: string): boolean {
+  return endpointActivity.busy(instanceId) || [...runningTurnEngines.values()].some(instance => instance.instanceId === instanceId) ||
+    store.bots.some(bot => (bot.busy && bot.modelSelection.instanceId === instanceId) ||
+      store.tasks(bot.id).some(task => threadBusy(bot.id, task.threadId) &&
+        (task.modelSelection ?? bot.modelSelection).instanceId === instanceId));
+}
+
+async function persistIndependentEndpoints(instanceIds: string[], instances: NonNullable<AppConfig["instances"]>, runtimeChanged = true): Promise<EndpointCommit> {
+  if (!runtimeChanged) {
+    saveConfig({ instances }, { replaceInstances: true });
+    cfg.instances = instances;
+    for (const id of instanceIds) {
+      const name = instances[id]?.displayName;
+      if (name) registry.updateDisplayName(id, name);
+    }
+    return { committed: true, instanceIds, loadResults: instanceIds.map(instanceId => ({ instanceId, state: registry.get(instanceId) ? "loaded" : "unavailable" })) };
+  }
+  return persistEndpointInstances({
+    changing: (id, changing) => {
+      if (changing) { providerInstancesChanging.add(id); endpointActivity.block(id); }
+      else { providerInstancesChanging.delete(id); if (!registry.endpointQuarantined(id)) endpointActivity.unblock(id); }
+    },
+    save: next => { saveConfig({ instances: next }, { replaceInstances: true }); cfg.instances = next; },
+    revoke: ids => {
+      revokeEngineCapabilities(ids);
+      for (const id of ids) { providerAuthSessions.clearInstance(id); bus.detach(id); engineEndpointChecks.clear(id); }
+    },
+    replace: async (id, next) => {
+      const entry = instanceConfigs({ ...cfg, instances: next })[id];
+      const result = await registry.replaceEndpoint(id, entry);
+      const live = registry.get(id);
+      if (live) bus.attach([live]);
+      resetPathCache();
+      return result;
+    },
+  }, instanceIds, instances);
 }
 
 /** The engine a bot's process in a conversation runs on: the running turn's when it is the bot's, else the bot's selection there. */
@@ -12412,11 +12502,24 @@ const postiz = createPostiz({ cfg: () => cfg, mcpOAuth, persistMcpServers: persi
   ...(CLOUD_TEAM ? { ownProfile: (auth: RequestAuth, profile: { name?: string; avatarUrl?: string; aboutMe?: string }) => auth.kind === "session" ? (teamHost.saveMemberProfile(auth.session, profile), true) : false } : {}),
   resyncOpenCodeProviderKeys, revokeEngineCapabilities, reloadProviders, broadcast, drainQueuedSends, postiz,
 }));
+ROUTES.push(createEngineEndpointRoutes({
+  store, cfg, dataDir: DATA_DIR, hostedModels: Boolean(hostedModels),
+  providerConfigBusy: { get: () => providerConfigBusy, set: busy => { providerConfigBusy = busy; } },
+  busy: independentEndpointBusy, describeInstances, persist: persistIndependentEndpoints,
+  readOnly: instanceId => managedDesktop.owns(instanceId) || cloudCredit?.owns(instanceId) === true,
+  loadState: instanceId => ({ instanceId, state: registry.get(instanceId) ? "loaded" : "unavailable" }),
+  check: (instanceId, model, kind) => endpointActivity.run(instanceId, async () => {
+    const instance = registry.get(instanceId);
+    const endpoint = endpointFromConfig(cfg.instances?.[instanceId]?.config);
+    if (!instance || !endpoint) throw new Error("This connection is unavailable. Check its settings.");
+    return engineEndpointChecks.run({ instance, revision: endpoint.revision, model, kind });
+  }),
+}));
 ROUTES.push(createInstanceRoutes({
   store, cfg, registry, sessions, providerAuthSessions,
   hostedModels: Boolean(hostedModels),
   providerConfigBusy: { get: () => providerConfigBusy, set: (busy) => { providerConfigBusy = busy; } },
-  providerInstancesChanging, describeInstances, persistProviderInstance, configStatus, broadcast, testCliBinary,
+  providerInstancesChanging, describeInstances, persistProviderInstance, persistIndependentEndpoints, configStatus, broadcast, testCliBinary,
   cliProbeEnvironment, threadBusy, botForThread, activeGroupTurnForBot, checkInstance: testedAi.check,
 }));
 ROUTES.push(createMcpServerRoutes({

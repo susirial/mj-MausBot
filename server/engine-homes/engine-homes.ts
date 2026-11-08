@@ -82,6 +82,11 @@ export class EngineHomes {
     const setup = this.#setup;
     const threadId = setup ? this.#thread.getStore() : undefined;
     if (!setup || threadId === undefined) return null;
+    if (env.OPENMAUSBOT_ENDPOINT_INSTANCE_ID) {
+      const home = audienceHome(setup.dataDir, setup.audienceOf(threadId));
+      mkdirSync(home, { recursive: true, mode: 0o700 });
+      return { env: { ...env, HOME: home }, home, folders: [], shared: [] };
+    }
     this.migrate();
     const home = audienceHome(setup.dataDir, setup.audienceOf(threadId));
     mkdirSync(home, { recursive: true, mode: 0o700 });

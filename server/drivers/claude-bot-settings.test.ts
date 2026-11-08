@@ -23,6 +23,69 @@ function folders(settings: unknown): { file: string; bot: string; thread: string
 const guard = { matcher: "Bash", hooks: [{ type: "command", command: "/opt/guards/no-force-push.sh", timeout: 10 }] };
 
 describe("botSettingsFor", () => {
+  it("carries only validated project settings for an endpoint", () => {
+    const { file, bot } = folders({
+      model: "wrong", apiKeyHelper: "echo key", awsAuthRefresh: "aws login",
+      env: { ANTHROPIC_AUTH_TOKEN: "wrong", CLAUDE_CODE_USE_BEDROCK: "1", TOOL_OPTION: "yes" },
+      permissions: { deny: ["Read(./.env)"] }, outputStyle: "concise", sandbox: { enabled: true },
+    });
+    expect(botSettingsFor(file, bot, {}, { endpoint: true, project: true })).toEqual({
+      env: { TOOL_OPTION: "yes" }, permissions: { deny: ["Read(./.env)"] },
+    });
+  });
+  it("does not merge malformed project fields over endpoint settings and permission rules", () => {
+    const { file, bot } = folders({
+      model: 7, apiKeyHelper: "echo wrong-key", outputStyle: 5, statusLine: "invalid",
+      hooks: { PreToolUse: [guard, { matcher: 7, hooks: "invalid" }], Stop: "invalid" },
+      enabledPlugins: { "guard@team": true, broken: "invalid" },
+      permissions: { allow: "invalid", deny: ["Read(./.env)", 7], defaultMode: "invalid" },
+      env: { ANTHROPIC_BASE_URL: "https://wrong.example", GUARD_LEVEL: "strict", BROKEN: 7 },
+    });
+    expect(withBotSettings(botSettingsFor(file, bot, {}, { endpoint: true, project: true }), {
+      model: "endpoint-model", env: { ANTHROPIC_BASE_URL: "https://endpoint.example" },
+      permissions: { deny: ["Bash"] },
+    })).toEqual({
+      model: "endpoint-model", env: { ANTHROPIC_BASE_URL: "https://endpoint.example", GUARD_LEVEL: "strict" },
+      permissions: { deny: ["Read(./.env)", "Bash"] }, hooks: { PreToolUse: [guard] },
+      enabledPlugins: { "guard@team": true },
+    });
+  });
+  it("filters mixed-case protected env names while preserving ordinary tool settings", () => {
+    const { file, bot } = folders({
+      env: {
+        anthropic_api_key: "wrong", Anthropic_Base_Url: "https://wrong.example",
+        Claude_Code_Oauth_Token: "wrong", Claude_Code_Use_Vertex: "1",
+        Omb_Claude_Inherit_User_Config: "1", omb_claude_autocompact: "200000",
+        OpenMausBot_Endpoint_Api_Key: "wrong", Claude_Config_Dir: "/wrong",
+        Guard_Level: "strict",
+      },
+    });
+    expect(botSettingsFor(file, bot, {}, { endpoint: true, project: true })).toEqual({ env: { Guard_Level: "strict" } });
+  });
+  it("filters endpoint identity settings without losing project tools, hooks or permissions", () => {
+    const { file, thread } = folders({
+      apiKeyHelper: "echo project-key", model: "claude-opus-5",
+      env: {
+        ANTHROPIC_API_KEY: "project-key", ANTHROPIC_AUTH_TOKEN: "project-token",
+        ANTHROPIC_BASE_URL: "https://wrong.example", CLAUDE_CODE_OAUTH_TOKEN: "project-oauth",
+        CLAUDE_CODE_USE_BEDROCK: "1", CLAUDE_CODE_USE_VERTEX: "1", CLAUDE_CODE_USE_FOUNDRY: "1",
+        ANTHROPIC_DEFAULT_FABLE_MODEL: "wrong", CLAUDE_CODE_SUBAGENT_MODEL: "wrong",
+        CLAUDE_CODE_EFFORT_LEVEL: "max", CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000",
+        CLAUDE_CONFIG_DIR: "/wrong", GUARD_LEVEL: "strict",
+      },
+      hooks: { PreToolUse: [guard] },
+      permissions: { deny: ["Read(./.env)"] },
+      enabledPlugins: { "guard@team": true },
+    });
+    expect(botSettingsFor(file, thread, {}, { endpoint: true })).toEqual({
+      env: { GUARD_LEVEL: "strict" }, hooks: { PreToolUse: [guard] },
+      permissions: { deny: ["Read(./.env)"] }, enabledPlugins: { "guard@team": true },
+    });
+    expect(botSettingsFor(file, thread, {})).toMatchObject({
+      env: { ANTHROPIC_API_KEY: "project-key", CLAUDE_CODE_USE_BEDROCK: "1" },
+    });
+  });
+
   it("takes the bot's hooks, plugins, permission rules and env", () => {
     const settings = {
       hooks: { PreToolUse: [guard] },

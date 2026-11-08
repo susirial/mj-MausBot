@@ -5,8 +5,11 @@ import { useStore, type InstanceInfo } from "@/state/store";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
 import { InstanceProviderMark } from "./ProviderIcons";
+import { endpointModelStatus, endpointServiceLabel } from "@/lib/engine-connection-status";
 
 export function engineReady(instance: InstanceInfo): boolean {
+  if (instance.engineEndpoint) return endpointModelStatus(instance, instance.engineEndpoint.catalog.default, { state: "unverified" }).canSelect;
+  if (instance.independentEndpoint) return false;
   if (instance.driverKind === "clineAgent") {
     return instance.snapshot.state === "available" && instance.snapshot.authenticated === true;
   }
@@ -22,6 +25,7 @@ const providers: Record<string, string> = {
 };
 
 export function providerName(instance: InstanceInfo): string {
+  if (instance.engineEndpoint) return endpointServiceLabel(instance);
   return providers[instance.driverKind] ?? instance.driverKind;
 }
 

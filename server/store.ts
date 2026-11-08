@@ -71,6 +71,7 @@ export function isProjectEmoji(value: unknown): value is string {
 
 export interface TaskRecord extends Omit<WireTask, TaskWireDerivedKeys> {
   resumeCursors: Record<string, unknown>;
+  endpointResumeRevisions?: Record<string, number>;
   lastInstanceId?: string;
   handedMessages?: Record<string, HandedState>;
   appliedCompactionId?: string;
@@ -82,7 +83,7 @@ export interface TaskRecord extends Omit<WireTask, TaskWireDerivedKeys> {
   askedAt?: number;
 }
 
-export type TaskWirePrivateKeys = "resumeCursors" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel" | "surfaceSource" | "askedAt";
+export type TaskWirePrivateKeys = "resumeCursors" | "endpointResumeRevisions" | "lastInstanceId" | "handedMessages" | "appliedCompactionId" | "contextFloor" | "lastContextModel" | "surfaceSource" | "askedAt";
 export type TaskWireDerivedKeys = "surfaceAuto" | "followsBotModel";
 export type TaskWireProjection = Pick<TaskRecord, Exclude<keyof TaskRecord, TaskWirePrivateKeys>> & Pick<WireTask, TaskWireDerivedKeys>;
 type AssertExact<A, B> = [A] extends [B] ? ([B] extends [A] ? true : never) : never;
@@ -92,7 +93,7 @@ export type TaskWireProjectionIsExact = AssertExact<WireTask, TaskWireProjection
 export const taskWireProjectionIsExact: TaskWireProjectionIsExact = true;
 
 export function toWireTask(task: TaskRecord, botModel: ModelSelection): WireTask {
-  const { resumeCursors: _resumeCursors, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages,
+  const { resumeCursors: _resumeCursors, endpointResumeRevisions: _endpointResumeRevisions, lastInstanceId: _lastInstanceId, handedMessages: _handedMessages,
     appliedCompactionId: _appliedCompactionId, contextFloor: _contextFloor, lastContextModel: _lastContextModel,
     surfaceSource, askedAt: _askedAt, ...stored } = task;
   const wire: WireTask = { ...stored, modelSelection: structuredClone(task.modelSelection ?? botModel), followsBotModel: task.modelSelection === undefined };
@@ -103,10 +104,21 @@ const ASK_NOW = { approvalMode: "ask" as const, autoApprove: false, alwaysAllow:
 
 const TASK_PATCH_FIELDS = [
   "title", "projectId", "modelSelection", "approvalMode", "autoApprove", "alwaysAllow",
-  "unread", "lastReadMessageId", "rewound", "archivedAt", "pinned", "pinnedMessageId", "resumeCursors", "lastInstanceId", "cwd",
+  "unread", "lastReadMessageId", "rewound", "archivedAt", "pinned", "pinnedMessageId", "resumeCursors", "endpointResumeRevisions", "lastInstanceId", "cwd",
   "routineRunId", "surface", "surfaceSource", "snoozedUntil", "link", "linkAuto", "appliedCompactionId", "contextFloor", "lastContextModel", "setupRequest", "botApi", "outside",
 ] as const satisfies readonly (keyof TaskRecord)[];
 export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number]>>;
+
+function endpointResumeRevisionPatch(task: TaskRecord, patch: TaskPatch): Pick<TaskPatch, "endpointResumeRevisions"> {
+  const rebound = Object.hasOwn(patch, "endpointResumeRevisions");
+  if (!rebound && !Object.hasOwn(patch, "resumeCursors")) return {};
+  const revisions = rebound ? patch.endpointResumeRevisions : task.endpointResumeRevisions;
+  if (!revisions) return rebound ? { endpointResumeRevisions: undefined } : {};
+  const cursors = Object.hasOwn(patch, "resumeCursors") ? patch.resumeCursors ?? {} : task.resumeCursors;
+  const kept = Object.fromEntries(Object.entries(revisions).filter(([id]) =>
+    typeof cursors[id] === "string" && (rebound || cursors[id] === task.resumeCursors[id])));
+  return { endpointResumeRevisions: Object.keys(kept).length ? kept : undefined };
+}
 
 export type GroupTaskPatch = Partial<Pick<GroupTaskRecord, "title" | "pinned">> & { turnTimeoutMinutes?: number | null; archivedAt?: number | null; activity?: "waiting-on-you" | null };
 
@@ -1534,11 +1546,13 @@ export class Store {
     for (const task of toAsk) Object.assign(task, structuredClone(ASK_NOW));
     const task = this.activeTask(id);
     if (task) {
+      const revisionPatch = endpointResumeRevisionPatch(task, Object.hasOwn(patch, "resumeCursors") ? { resumeCursors: patch.resumeCursors } : {});
       for (const key of ["resumeCursors", "rewound", "pinnedMessageId", "unread"] as const) {
         if (Object.prototype.hasOwnProperty.call(patch, key)) {
           Object.assign(task, { [key]: structuredClone(patch[key]) });
         }
       }
+      Object.assign(task, revisionPatch);
       bot.unread = bot.tasks!.some(taskCountsAsBotUnread);
     }
     if (wideningToolScope) {
@@ -1727,7 +1741,17 @@ export class Store {
       for (const task of bot.tasks ?? []) {
         const taskSelected = task.modelSelection && ids.get(task.modelSelection.instanceId);
         if (task.modelSelection && taskSelected) { task.modelSelection = { ...task.modelSelection, instanceId: taskSelected }; dirty = true; }
-        if (touches(task.resumeCursors)) { task.resumeCursors = rename(task.resumeCursors); dirty = true; }
+        if (touches(task.resumeCursors) || touches(task.endpointResumeRevisions)) {
+          if (task.endpointResumeRevisions) {
+            const bindings = rename(Object.fromEntries(Object.entries(task.resumeCursors).map(([id, cursor]) =>
+              [id, { cursor, revision: task.endpointResumeRevisions?.[id] }])));
+            const revisions = Object.fromEntries(Object.entries(bindings).flatMap(([id, binding]) =>
+              typeof binding.cursor === "string" && binding.revision !== undefined ? [[id, binding.revision]] : []));
+            task.endpointResumeRevisions = Object.keys(revisions).length ? revisions : undefined;
+          }
+          task.resumeCursors = rename(task.resumeCursors);
+          dirty = true;
+        }
         if (task.handedMessages && touches(task.handedMessages)) { task.handedMessages = rename(task.handedMessages); dirty = true; }
         const last = task.lastInstanceId && ids.get(task.lastInstanceId);
         if (last) { task.lastInstanceId = last; dirty = true; }
@@ -1807,6 +1831,10 @@ export class Store {
           moves.push({ botId: bot.id, threadId: task.threadId, scope: "bot-only", ...cloudAfterMove(undefined, undefined), askNow: botAsk });
         }
         if (touches(task.resumeCursors)) taskPatch.resumeCursors = without(task.resumeCursors);
+        if (task.endpointResumeRevisions && touches(task.endpointResumeRevisions)) {
+          const revisions = without(task.endpointResumeRevisions);
+          taskPatch.endpointResumeRevisions = Object.keys(revisions).length ? revisions : undefined;
+        }
         if (task.handedMessages && touches(task.handedMessages)) taskPatch.handedMessages = without(task.handedMessages);
       });
       if (Object.keys(patch).length || tasks.some(taskPatch => Object.keys(taskPatch).length)) changes.push({ bot, patch, tasks });
@@ -1829,9 +1857,28 @@ export class Store {
     if (!bot) return;
     const task = threadId ? this.taskByThread(botId, threadId) : this.activeTask(botId), mirrored = !threadId || bot.threadId === threadId;
     if (isDeepStrictEqual(task?.resumeCursors[instanceId], cursor) && (!mirrored || isDeepStrictEqual(bot.resumeCursors[instanceId], cursor))) return;
-    if (task) task.resumeCursors[instanceId] = cursor; if (mirrored) bot.resumeCursors[instanceId] = cursor;
+    if (task) {
+      if (!isDeepStrictEqual(task.resumeCursors[instanceId], cursor)) delete task.endpointResumeRevisions?.[instanceId];
+      task.resumeCursors[instanceId] = cursor;
+    }
+    if (mirrored) bot.resumeCursors[instanceId] = cursor;
     saveRegistryFor("bots.json", "the conversation's engine session", () => this.saveBotsSoon());
     this.emit({ type: "bot", botId });
+  }
+
+  setEndpointResumeCursor(threadId: string, instanceId: string, binding: { cursor: string; revision: number }): void {
+    const bot = this.botByThread(threadId);
+    const task = bot && this.taskByThread(bot.id, threadId);
+    if (!bot || !task) return;
+    const mirrored = bot.threadId === threadId;
+    if (task.resumeCursors[instanceId] === binding.cursor && task.endpointResumeRevisions?.[instanceId] === binding.revision &&
+        (!mirrored || bot.resumeCursors[instanceId] === binding.cursor)) return;
+    this.commitBotChange(bot, "the conversation's endpoint session", () => {
+      task.resumeCursors[instanceId] = binding.cursor;
+      task.endpointResumeRevisions = { ...task.endpointResumeRevisions, [instanceId]: binding.revision };
+      if (mirrored) bot.resumeCursors[instanceId] = binding.cursor;
+    });
+    this.emit({ type: "bot", botId: bot.id });
   }
 
   markTaskDispatched(botId: string, threadId: string, instanceId: string) {
@@ -2058,6 +2105,7 @@ export class Store {
     const task = this.taskByThread(botId, threadId);
     if (!bot || !task) return null;
     if (patch.projectId !== undefined && !this.project(botId, patch.projectId)) return null;
+    patch = { ...patch, ...endpointResumeRevisionPatch(task, patch) };
     const revocation = keptRevocation(threadApproval(task, bot), threadApproval({ ...task, ...patch }, bot), patch);
     this.commitBotChange(bot, "the thread change", () => {
       for (const key of TASK_PATCH_FIELDS) {
@@ -2105,6 +2153,7 @@ export class Store {
     if (!bot || !task) return null;
     const approval = resetApprovalToAsk ? structuredClone(ASK_NOW) : {};
     const own = sameModelSelection(selection, updateBotDefault ? selection : bot.modelSelection) ? undefined : structuredClone(selection);
+    taskPatch = { ...taskPatch, ...endpointResumeRevisionPatch(task, taskPatch) };
     const nextTask = persistedPin({ ...task, ...taskPatch, modelSelection: own, ...approval,
       ...(typeof taskPatch.title === "string" ? { title: taskPatch.title.trim().slice(0, 80) || UNTITLED_THREAD } : {}) });
     const others = updateBotDefault ? this.withDefaultModel(bot, selection)! : bot.tasks!;
@@ -2122,10 +2171,14 @@ export class Store {
     const bot = this.bot(botId);
     if (!bot?.tasks) return [];
     const listed = new Set(threadIds);
-    const patches = bot.tasks.map((task): Partial<TaskRecord> | null => !listed.has(task.threadId) || task.modelSelection === undefined ? null : {
-      ...reset(task.modelSelection, bot.modelSelection),
-      modelSelection: undefined,
-      ...(this.switchNeedsAsk(botId, task.threadId, task.modelSelection, bot.modelSelection) ? structuredClone(ASK_NOW) : {}),
+    const patches = bot.tasks.map((task): Partial<TaskRecord> | null => {
+      if (!listed.has(task.threadId) || task.modelSelection === undefined) return null;
+      const patch = reset(task.modelSelection, bot.modelSelection);
+      return {
+        ...patch, ...endpointResumeRevisionPatch(task, patch),
+        modelSelection: undefined,
+        ...(this.switchNeedsAsk(botId, task.threadId, task.modelSelection, bot.modelSelection) ? structuredClone(ASK_NOW) : {}),
+      };
     });
     const moved = bot.tasks.filter((_, index) => patches[index]).map((task) => task.threadId);
     if (!moved.length) return [];

@@ -241,7 +241,7 @@ export function createTestedAi(deps: TestedAiDeps) {
    * to look after. One miss waits for its retry; two hand over to the next AI. */
   const sweep = () => {
     if (!background || fixed()) return;
-    const own = lastInstances.filter((instance) => readyToRun(instance, deps.context) && hasModel(instance)
+    const own = lastInstances.filter((instance) => !instance.independentEndpoint && readyToRun(instance, deps.context) && hasModel(instance)
       && deps.context.company?.(instance.instanceId) !== true);
     for (const instance of rankAis(own)) {
       if (running.has(instance.instanceId)) return;

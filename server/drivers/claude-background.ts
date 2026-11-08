@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnCli } from "../procs.ts";
+import type { EffortLevel } from "../contracts.ts";
 
 type BackgroundFlag = "--tools" | "--no-session-persistence" | "--strict-mcp-config" | "--setting-sources";
 
@@ -18,8 +19,12 @@ export function backgroundCallArgs(input: {
   supports: (flag: BackgroundFlag) => boolean;
   /** False while OMB_CLAUDE_INHERIT_USER_CONFIG asks for the person's own setup. */
   isolated: boolean;
+  endpoint?: { settings: object; effort?: EffortLevel; autoCompactTokens?: number };
 }): string[] {
-  const args = ["-p", "--model", input.model, "--output-format", input.outputFormat, "--settings", BACKGROUND_SETTINGS];
+  const settings = input.endpoint ? JSON.stringify({ ...input.endpoint.settings, disableAllHooks: true }) : BACKGROUND_SETTINGS;
+  const args = ["-p", "--model", input.model, "--output-format", input.outputFormat, "--settings", settings];
+  if (input.endpoint?.effort) args.push("--effort", input.endpoint.effort);
+  if (input.endpoint?.autoCompactTokens !== undefined) args.push("--autocompact", String(input.endpoint.autoCompactTokens));
   if (input.supports("--tools")) args.push("--tools", "");
   if (input.supports("--no-session-persistence")) args.push("--no-session-persistence");
   if (input.isolated) {

@@ -9,6 +9,8 @@ import { withLocalContext } from "../drivers/local-inject.ts";
 import { engineStatusFile, snapshotFrom } from "./engine-status-file.ts";
 import { withUnaskedStops } from "./unasked-stop.ts";
 import { withWslNotice } from "./wsl-launch.ts";
+import { endpointActivity } from "../endpoint-activity.ts";
+import { endpointFromConfig } from "../engine-endpoints.ts";
 export { engineMemory } from "../engine-memory.ts";
 import { clientInstall } from "../contracts.ts";
 import type {
@@ -104,6 +106,35 @@ export function enginesByUse(selections: ReadonlyArray<{ instanceId: InstanceId 
 type SharedRead = { generation: number; settledAt?: number; read: Promise<ProviderSnapshot> };
 
 export class ProviderRegistry {
+  private readonly endpointDisposals = new Map<InstanceId, ProviderInstance>();
+  endpointQuarantined(instanceId: InstanceId): boolean { return this.endpointDisposals.has(instanceId); }
+
+  async replaceEndpoint(instanceId: InstanceId, entry: InstanceConfigMap[string]): Promise<{ instanceId: string; state: "loaded" | "unavailable"; reason?: string }> {
+    const old = this.endpointDisposals.get(instanceId) ?? this.get(instanceId);
+    if (old) this.endpointDisposals.set(instanceId, old);
+    const reason = "Connection could not be loaded. Check its settings.";
+    this.byId.set(instanceId, { instanceId, shadow: {
+      instanceId, driverKind: entry.driver, displayName: entry.displayName,
+      cli: cliOfRaw(entry.config), shadow: true, reason,
+    } });
+    this.lastSnapshots.delete(instanceId);
+    this.seeds.delete(instanceId);
+    try {
+      await old?.dispose();
+      this.endpointDisposals.delete(instanceId);
+      await this.load({ [instanceId]: entry });
+      const loaded = this.byId.get(instanceId);
+      return loaded?.live ? { instanceId, state: "loaded" } : { instanceId, state: "unavailable", reason: loaded?.shadow?.reason ?? reason };
+    } catch {
+      return { instanceId, state: "unavailable", reason };
+    }
+  }
+
+  updateDisplayName(instanceId: InstanceId, displayName: string): void {
+    const entry = this.byId.get(instanceId);
+    if (entry?.live) Object.assign(entry.live, { displayName });
+    if (entry?.shadow) entry.shadow.displayName = displayName;
+  }
   private byId = new Map<InstanceId, RegistryEntry>();
   private cliByInstance = new Map<InstanceId, string>();
   private lastSnapshots = new Map<InstanceId, ProviderSnapshot>();
@@ -176,13 +207,18 @@ export class ProviderRegistry {
       // The RAW config: decodeConfig fills in the driver default, which would flag every instance as overridden.
       const rawCli = cliOfRaw(entry.config);
       if (rawCli) this.cliByInstance.set(instanceId, rawCli);
-      const live = withLocalContext(withUnaskedStops(withEngineHomes(withEngineMemory(await driver.create({
+      const endpoint = endpointFromConfig(entry.config);
+      const live = withUnaskedStops(withEngineHomes(withEngineMemory(await driver.create({
         instanceId,
         displayName: entry.displayName ?? driver.metadata.displayName,
         environment: entry.environment ?? {},
         enabled: entry.enabled ?? true,
         config,
-      })))));
+      }))));
+      if (endpoint) {
+        Object.assign(live, { endpointRevision: endpoint.revision });
+        endpointActivity.wrap(live, entry.environment?.OPENMAUSBOT_ENDPOINT_API_KEY);
+      } else withLocalContext(live);
       this.shareSnapshot(live);
       return { instanceId, live: decorate ? decorate(live) : live };
     } catch (e) {
@@ -557,7 +593,8 @@ export class ProviderRegistry {
   }
 
   async disposeAll() {
-    await Promise.allSettled(this.instances().map((i) => i.dispose()));
+    await Promise.allSettled([...new Set([...this.instances(), ...this.endpointDisposals.values()])].map((i) => i.dispose()));
+    this.endpointDisposals.clear();
     this.byId.clear();
     this.cliByInstance.clear();
     this.lastSnapshots.clear();
@@ -570,6 +607,7 @@ export class ProviderRegistry {
     this.cliByInstance.delete(instanceId);
     this.lastSnapshots.delete(instanceId);
     this.seeds.delete(instanceId);
-    await entry?.live?.dispose();
+    await (entry?.live ?? this.endpointDisposals.get(instanceId))?.dispose();
+    this.endpointDisposals.delete(instanceId);
   }
 }

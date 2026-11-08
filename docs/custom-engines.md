@@ -1,5 +1,12 @@
 # Bring your own engine
 
+For Codex or Claude Code with DeepSeek, Kimi, or a custom API service, use
+**Settings → AI → API connections**. Select a service and execution tool, enter
+the key, review the address and models, and save. Choosing both tools creates
+separate instances. Select one in a bot's model picker. Existing official
+accounts and Claude endpoints stay configured; no migration is required.
+See [independent connection setup and verification](verification/engine-endpoints.md).
+
 Two zero-code ways to run OpenMausBot bots on an engine the app doesn't ship.
 Both live in `~/.openmausbot/config.json` under `"instances"`; restart the app
 after editing (instance entries are read at boot).

@@ -9,6 +9,7 @@ export interface SelectableInstance {
   capabilities?: { effortLevels?: readonly EffortLevel[]; modelVariants?: boolean };
   access?: EngineAccess;
   enabled?: boolean;
+  independentEndpoint?: boolean;
 }
 
 export interface DefaultSelectionContext {
@@ -33,8 +34,13 @@ export function withInstanceConfig<T extends SelectableInstance>(instances: read
   return instances.filter((instance) => configs[instance.instanceId]?.hidden !== true).map((instance) => ({
     ...instance,
     enabled: configs[instance.instanceId]?.enabled ?? instance.enabled,
+    ...(hasIndependentEndpoint(configs[instance.instanceId]?.config) ? { independentEndpoint: true } : {}),
     ...(configs[instance.instanceId]?.access ? { access: configs[instance.instanceId].access } : {}),
   }));
+}
+
+function hasIndependentEndpoint(config: unknown): boolean {
+  return config !== null && typeof config === "object" && "endpoint" in config && config.endpoint !== undefined;
 }
 
 /** A custom endpoint brings its own credential, so its sign-in state does not count. */
@@ -76,7 +82,7 @@ export function selectDefaultModelSelection(
     if (selection.effort && !instance.capabilities?.effortLevels?.includes(selection.effort)) delete selection.effort;
     return selection;
   }
-  const available = instances.filter((instance) => instance.enabled !== false && instance.snapshot.state === "available" && context.refusal?.(instance) === undefined && defaultModel(instance));
+  const available = instances.filter((instance) => !instance.independentEndpoint && instance.enabled !== false && instance.snapshot.state === "available" && context.refusal?.(instance) === undefined && defaultModel(instance));
   const ready = available.filter((instance) => readyToRun(instance, context));
   const company = context.company;
   const personal = company && instances.some((instance) => company(instance.instanceId))

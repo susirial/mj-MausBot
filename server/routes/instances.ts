@@ -16,6 +16,9 @@ import {
   withClaudeEndpointInfo,
 } from "../claude-endpoints.ts";
 import { updateClaudeCli } from "../claude-update.ts";
+import { endpointFromConfig, isEngineEndpoint, updateEndpointEntry } from "../engine-endpoints.ts";
+import { endpointActivity } from "../endpoint-activity.ts";
+import type { EndpointCommit } from "../endpoint-persistence.ts";
 import { persistableInstanceConfigs, saveConfig, withInstanceCli, type AppConfig } from "../config.ts";
 import { addEndpoint, addEndpointSchema, isAddedEndpoint, withEndpointUrls } from "../openai-compat-endpoints.ts";
 import type { InstanceConfigMap, ModelSelection, ProviderInstance } from "../contracts.ts";
@@ -44,6 +47,7 @@ export interface InstanceRouteDeps {
   providerInstancesChanging: Pick<Set<string>, "add" | "delete">;
   describeInstances(): Promise<unknown>;
   persistProviderInstance(instanceId: string, instances: InstanceConfigMap): Promise<void>;
+  persistIndependentEndpoints?(instanceIds: string[], instances: InstanceConfigMap, runtimeChanged?: boolean): Promise<EndpointCommit>;
   configStatus(): ConfigStatus;
   broadcast(payload: Record<string, unknown>): void;
   testCliBinary(cli: string, driver: (typeof BUILT_IN_DRIVERS)[number] | undefined): Promise<unknown>;
@@ -375,6 +379,10 @@ export function createInstanceRoutes(deps: InstanceRouteDeps): RouteHandler {
       if (!parsed.success) return json(res, 400, { ...userError("serverError.instance.settingsInvalid") });
       const body = parsed.data;
       const instanceId = instancePatch[1];
+      const endpointEntry = cfg.instances?.[instanceId];
+      if (isEngineEndpoint(endpointEntry) && body.configDir !== undefined) {
+        return json(res, 400, { error: "Independent API connections manage their own private CLI directory." });
+      }
       if (providerConfigBusy.get()) return json(res, 409, { error: "provider settings are already being updated" });
       if (busyProviderSelections().some((selection) => selection.instanceId === instanceId)) {
         return json(res, 409, { error: "Wait for bots using this account to finish before changing its settings." });
@@ -382,6 +390,18 @@ export function createInstanceRoutes(deps: InstanceRouteDeps): RouteHandler {
       providerConfigBusy.set(true);
       providerInstancesChanging.add(instanceId);
       try {
+        if (endpointEntry && isEngineEndpoint(endpointEntry) && (body.cli !== undefined || body.displayName !== undefined) &&
+            body.hidden === undefined && deps.persistIndependentEndpoints) {
+          const endpoint = endpointFromConfig(endpointEntry.config);
+          if (!endpoint) return json(res, 400, { error: "Invalid independent connection." });
+          const changed = updateEndpointEntry(structuredClone(cfg.instances ?? {}), instanceId, {
+            expectedRevision: endpoint.revision, ...(body.cli !== undefined ? { cli: body.cli } : {}),
+            ...(body.displayName !== undefined ? { displayName: body.displayName } : {}),
+          });
+          if (changed.runtimeChanged && endpointActivity.busy(instanceId)) return json(res, 409, { error: "This connection has a background task running." });
+          await deps.persistIndependentEndpoints([instanceId], changed.instances, changed.runtimeChanged);
+          return json(res, 200, { instances: await describeInstances() });
+        }
         const result = body.cli === undefined ? { ok: true, config: cfg } : withInstanceCli(cfg, instanceId, body.cli);
         const instances = persistableInstanceConfigs(result.config);
         if (!result.ok || !Object.hasOwn(instances, instanceId)) return json(res, 404, { error: `unknown instance "${instanceId}"` });
@@ -430,16 +450,17 @@ export function createInstanceRoutes(deps: InstanceRouteDeps): RouteHandler {
     if (method === "DELETE" && instancePatch) {
       const instanceId = instancePatch[1];
       if (providerConfigBusy.get()) return json(res, 409, { error: "provider settings are already being updated" });
-      const instances = persistableInstanceConfigs(cfg);
+      const instances = isEngineEndpoint(cfg.instances?.[instanceId]) ? structuredClone(cfg.instances ?? {}) : persistableInstanceConfigs(cfg);
       if (!Object.hasOwn(instances, instanceId)) return json(res, 404, { error: "unknown instance" });
       const addedChatgpt = instances[instanceId].driver === "codex" && instanceId.startsWith("chatgpt-");
       const addedAntigravity = instances[instanceId].driver === "antigravityAgent" && instanceId.startsWith("antigravity-");
-      if (!addedChatgpt && !addedAntigravity && !isAddedEndpoint(instanceId, instances[instanceId]) && (instances[instanceId].driver !== "claudeAgent" || instanceId === "claude")) {
+      if (!isEngineEndpoint(instances[instanceId]) && !addedChatgpt && !addedAntigravity && !isAddedEndpoint(instanceId, instances[instanceId]) && (instances[instanceId].driver !== "claudeAgent" || instanceId === "claude")) {
         return json(res, 400, { error: "Only added Claude, ChatGPT, and Antigravity accounts and OpenAI-compatible endpoints can be removed here." });
       }
       if (providerInUse(instanceId)) {
         return json(res, 409, { error: "Choose another account for the bots and default model using this account before removing it." });
       }
+      if (isEngineEndpoint(instances[instanceId]) && endpointActivity.busy(instanceId)) return json(res, 409, { error: "Wait for background tasks using this connection to finish before removing it." });
       // OpenMausBot keeps a ChatGPT account's sign-in in its own data folder: removing the account clears it.
       const live = addedChatgpt ? registry.get(instanceId) : undefined;
       if (live?.signOut) {

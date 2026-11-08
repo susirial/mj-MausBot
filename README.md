@@ -1,6 +1,58 @@
+# mj-MausBot
+
+mj-MausBot 基于 [OpenMausBot](https://github.com/milind-soni/OpenMausBot)
+0.1.148 的开源源码，增加 Codex 和 Claude Code 的独立 API 连接。
+源码基线为 `3f81576655ca45af91bfaaa63dc37251222828eb`。
+
+本仓库不包含 `enterprise/`，也不沿用上游的自动发布和部署工作流。
+原始许可证、版权声明和第三方署名保留。来源及改动范围见
+[SOURCE.md](SOURCE.md)。
+
+## 启动应用
+
+需要 Node.js 24 及 pnpm 10。在本目录安装依赖：
+
+```sh
+pnpm install --frozen-lockfile
+```
+
+在两个终端分别运行：
+
+```sh
+pnpm dev:server
+```
+
+```sh
+pnpm dev
+```
+
+打开 http://127.0.0.1:5199/。桌面开发版需要保持上述两个进程运行，
+然后在第三个终端运行 `pnpm dev:desktop`。
+
+## 配置第三方模型
+
+首次启动可以选择“稍后设置”，然后打开“设置 → AI → API 连接”。
+选择 DeepSeek、Kimi 或自定义服务，再选择 Codex、Claude Code 或两者，
+填写地址、模型和 API key。保存后在模型菜单选择新实例。
+
+独立连接不要求登录官方 Codex 或 Claude 账号。官方登录入口仍保留。
+每个实例独立保存凭据、模型和 CLI 目录。保存和刷新不发送模型检查请求。
+点击检查可能产生供应商费用。
+
+使用和隔离验证方法见 [独立 API 连接说明](docs/verification/engine-endpoints.md)。
+本次检查结果见 [源码交付验证](docs/verification/mj-mausbot-import.md)。
+现有验证使用 fake CLI 和本地 HTTP 服务，未认证真实供应商兼容性。
+首次启动引导仍保留上游的官方登录推荐。
+
+## 上游项目说明
+
+以下保留上游 README。其中的下载链接、服务和发布记录属于 OpenMausBot，
+不代表 mj-MausBot 已发布安装包。mj-MausBot 的代码仓库是
+https://github.com/susirial/mj-MausBot。
+
 <div align="center">
 
-# OpenMausBot
+## OpenMausBot
 
 **The open-source Grok Bot alternative: your own team of AI bots, in a chat app.**
 

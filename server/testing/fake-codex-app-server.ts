@@ -109,6 +109,11 @@ if (process.argv[2] === "login" && process.argv[3] === "status") {
   statusStream.write("Logged in using ChatGPT\n");
   process.exit(0);
 }
+if (process.env.FAKE_CODEX_ENDPOINT === "1") {
+  const { runFakeEndpointCli } = await import("./fake-engine-endpoint.ts");
+  await runFakeEndpointCli("codex");
+  process.exit(process.exitCode ?? 0);
+}
 if (process.argv[2] === "exec") {
   // `codex exec --json … -`: prompt on stdin, answer as exec's JSONL events (codex-cli 0.160.1).
   const prompt = await new Promise<string>((resolve) => {

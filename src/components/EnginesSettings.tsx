@@ -11,6 +11,7 @@ import { AppCopyNotice } from "./EngineAppCopy";
 import { forgetAppCopySwitches } from "@/state/engine-install";
 import { AccountsCard, AddAccount, accountGroupOf, accountsReady, type AccountGroup } from "./EngineAccounts";
 import { ClaudeEndpoints } from "./ClaudeEndpoints";
+import { EngineEndpoints } from "./EngineEndpoints";
 import { DEVICE_SIGN_IN_COPY, deviceSignInProvider } from "./DeviceSignIn";
 import { AntigravityFreeSpace } from "./AntigravityFreeSpace";
 import { CacheKeepWarmSettings } from "./CacheKeepWarmSettings";
@@ -518,7 +519,7 @@ export function EnginesSettings({ simple = false, more }: { simple?: boolean; mo
   const { state } = useStore();
   // Leaving Settings ends the "now uses the copy OpenMausBot installed" lines.
   useEffect(() => forgetAppCopySwitches, []);
-  const listed = state.instances.filter((i) => i.readOnly || i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable" || isApiKeyEngine(i) || i.claudeEndpoint !== undefined);
+  const listed = state.instances.filter((i) => !i.engineEndpoint && !i.independentEndpoint && (i.readOnly || i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable" || isApiKeyEngine(i) || i.claudeEndpoint !== undefined));
   // A provider's accounts share one card, which takes the place of its first account.
   const groups = new Map<AccountGroup, InstanceInfo[]>();
   for (const instance of listed) {
@@ -546,6 +547,7 @@ export function EnginesSettings({ simple = false, more }: { simple?: boolean; mo
   if (simple && more) return <>
     <SimpleEngines rows={rows} isReady={isReady} renderEngine={renderEngine} more={more} />
     {orphanEndpoints && <div className="px-4"><ClaudeEndpoints /></div>}
+    <div className="px-4"><EngineEndpoints readOnly={hostedWorkspace} /></div>
   </>;
 
   return (
@@ -559,6 +561,7 @@ export function EnginesSettings({ simple = false, more }: { simple?: boolean; mo
       </div>
       <EngineSections instances={rows} isReady={isReady} renderEngine={renderEngine} />
       {orphanEndpoints && <div className="px-4"><ClaudeEndpoints /></div>}
+      <div className="px-4"><EngineEndpoints readOnly={hostedWorkspace} /></div>
       <HiddenEngines />
       <CacheKeepWarmSettings />
     </div>

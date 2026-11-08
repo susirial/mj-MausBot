@@ -45,7 +45,7 @@ vi.mock("@/state/store", async (importOriginal) => ({
 // These cases cover the full picker; Simple mode has its own file.
 vi.mock("@/lib/interface-mode", () => ({ useAdvancedMode: () => true, setAdvancedMode: () => {} }));
 
-const { ModelPicker } = await import("./ModelPicker");
+const { ModelPicker, EffortRow } = await import("./ModelPicker");
 const { LOCAL_PROBE_TIMEOUT_MS, offersLocalModels, probeLocalModels } = await import("./local-model-probe");
 const { ModelEngineRail } = await import("./ModelPickerFull");
 
@@ -113,6 +113,66 @@ function rail(rendered: ReturnType<typeof render>) {
 const menu = (html: string) => html.slice(html.indexOf("data-model-picker-content"));
 
 const flush = async () => { for (let index = 0; index < 20; index++) await Promise.resolve(); };
+
+it("shows an independent connection's CLI, service and selected-model check without joining official accounts", () => {
+  const endpoint: InstanceInfo = {
+    instanceId: "independent", displayName: "Work Kimi", driverKind: "claudeAgent", access: "custom",
+    snapshot: { state: "available", authenticated: false },
+    models: { default: "fixture-kimi", options: [{ id: "fixture-kimi", label: "Fixture Kimi", custom: true }] },
+    engineEndpoint: {
+      version: 1, revision: 1, runtime: "claude", protocol: "anthropic", provider: "kimi",
+      baseUrl: "https://fixture.test/anthropic", catalog: { default: "fixture-kimi", options: [
+        { id: "fixture-kimi", label: "Fixture Kimi", source: "configured", inputModalities: ["text"], effortLevels: [], nativeSearch: "unknown" },
+      ] }, backgroundModel: "fixture-kimi", roleModels: { opus: "fixture-kimi", sonnet: "fixture-kimi", haiku: "fixture-kimi", fable: "fixture-kimi", subagent: "fixture-kimi" },
+      keyConfigured: true, check: { state: "failed", model: "fixture-kimi", kind: "answer", checkedAt: 1, reason: "credentials", message: "Synthetic rejection" },
+    },
+  };
+  fixture.instances = [signedIn(), endpoint];
+  const opened = open(bot("independent", "fixture-kimi"));
+  expect(opened.html).toContain("Claude Code · Kimi");
+  expect(opened.html).toContain("API credentials rejected");
+  expect(opened.html).not.toContain("Sign in to Claude");
+  const listed = rail(opened)?.props.instances ?? [];
+  expect(listed.filter((instance) => instance.instanceId === "independent")).toHaveLength(1);
+});
+
+const effortEndpoint = (): InstanceInfo => ({
+  ...codex, instanceId: "endpoint", displayName: "Kimi API",
+  capabilities: { effortLevels: ["low", "high", "max"], modelVariants: true },
+  engineEndpoint: {
+    version: 1, revision: 1, runtime: "codex", protocol: "responses", provider: "kimi",
+    baseUrl: "https://fixture.test/v1", catalog: { default: "kimi", options: [
+      { id: "kimi", label: "Kimi", source: "configured", inputModalities: ["text"], effortLevels: [], nativeSearch: "unknown" },
+      { id: "reasoning", label: "Reasoning", source: "configured", inputModalities: ["text"], effortLevels: ["low", "medium"], nativeSearch: "unknown" },
+    ] }, backgroundModel: "kimi", webSearch: "disabled", keyConfigured: true, check: { state: "unverified" },
+  },
+});
+
+it("offers only the selected model and CLI effort intersection, ignoring model variants", () => {
+  fixture.instances = [effortEndpoint()];
+  const forBot = bot("endpoint", "reasoning");
+  const html = renderToStaticMarkup(createElement(EffortRow, { bot: forBot, compact: true }));
+  expect(html).toContain('value="low"');
+  expect(html).not.toContain('value="medium"');
+  expect(html).not.toContain('value="high"');
+  expect(html).not.toContain('value="max"');
+  expect(renderToStaticMarkup(createElement(EffortRow, { bot: bot("endpoint", "kimi") }))).toBe("");
+});
+
+it("drops inherited official effort and variant when selecting an endpoint with unknown efforts", () => {
+  const endpoint = effortEndpoint();
+  fixture.instances = [codex, endpoint];
+  const forBot = bot("codex", "gpt-5.6");
+  forBot.modelSelection = { ...forBot.modelSelection, effort: "max", variant: "official-high" };
+  const opened = open(forBot);
+  rail(opened)?.props.onSelect(endpoint);
+  const row = render(forBot).nodes.find((node) => node.props["data-endpoint-model"] === "kimi");
+  expect(row).toBeDefined();
+  (row!.props.onClick as () => void)();
+  expect(fixture.dispatch).toHaveBeenCalledWith(expect.objectContaining({
+    type: "setModel", selection: { instanceId: "endpoint", model: "kimi" },
+  }));
+});
 
 beforeEach(() => {
   fixture.values = [];
