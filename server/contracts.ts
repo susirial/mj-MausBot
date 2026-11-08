@@ -166,6 +166,8 @@ export interface SendTurnInput {
   mentionTurn?: boolean;
   /** The bot will likely browse, so a driver may load browser tools up front rather than behind tool search. */
   preloadBrowserTools?: boolean;
+  /** Names of this turn's custom MCP integrations to load before sampling. This does not grant permission or enable excluded servers. */
+  preloadMcpServers?: readonly string[];
   /** Per-bot integrations the driver may hand to the agent as tools. */
   integrations?: {
     /** A harness-owned stdio bridge to Composio, so connection requests become trusted chat cards. */

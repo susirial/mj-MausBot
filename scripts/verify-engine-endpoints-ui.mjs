@@ -99,6 +99,12 @@ try {
     await page.until(`document.querySelector(${JSON.stringify(selector + " [data-endpoint-check=answer]")}).textContent.includes('Verified for this model')`, 30000);
   }
   assertions.push("Both explicit answer checks pass through actual backend and loopback HTTP provider");
+  for (const connection of connections) {
+    const selector = `[data-engine-endpoint="${connection.instanceId}"]`;
+    await page.evaluate(`Array.from(document.querySelector(${JSON.stringify(selector)}).querySelectorAll('button')).find(b=>b.textContent==='Check tools').click()`);
+    await page.until(`document.querySelector(${JSON.stringify(selector + " [data-endpoint-check=tools]")}).textContent.includes('Verified for this model')`, 30000);
+  }
+  assertions.push("Both tool checks complete real native approval, MCP echo, and assistant answer through the full UI");
   await page.evaluate("document.querySelector('[data-engine-endpoints]').scrollIntoView({block:'start'})");
   save("settings.png", await page.capture());
   await page.evaluate("document.querySelector('button[aria-label=\"Close settings\"]').click()");
@@ -125,6 +131,26 @@ try {
   assert.equal((await api("GET", "/api/bots")).bots.find(b => b.id === bots[0].id).modelSelection.instanceId, codex.instanceId);
   assertions.push("Reload retains the independent model selection and conversation");
   save("chat.png", await page.capture());
+  await settings();
+  const toolSelector = `[data-engine-endpoint="${codex.instanceId}"]`;
+  service.mode("ui-codex", "no-echo");
+  await page.evaluate(`Array.from(document.querySelector(${JSON.stringify(toolSelector)}).querySelectorAll('button')).find(b=>b.textContent==='Check tools').click()`);
+  await page.until(`document.querySelector(${JSON.stringify(toolSelector)}).textContent.includes('The tool ran, but the assistant answer did not include its returned text.')`, 30000);
+  await api("PATCH", "/api/config", { language: "zh" });
+  await page.until(`document.querySelector(${JSON.stringify(toolSelector)}).textContent.includes('工具已执行，但助手回答未回显工具返回的内容。')`, 20000);
+  assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(toolSelector + " details")}).open`), false);
+  await page.evaluate(`document.querySelector(${JSON.stringify(toolSelector + " details summary")}).click()`);
+  assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(toolSelector + " details")}).open`), true);
+  assert(await page.evaluate(`(() => { const detail=document.querySelector(${JSON.stringify(toolSelector + " details")}); return detail.innerText.includes('The tool ran, but the assistant answer did not include its returned text.') && detail.innerText.includes('endpoint-check-'); })()`));
+  await page.evaluate(`document.querySelector(${JSON.stringify(toolSelector + " details summary")}).click()`);
+  await page.evaluate(`document.querySelector(${JSON.stringify(toolSelector)}).scrollIntoView({block:'center'})`);
+  save("tools-failure-zh.png", await page.capture());
+  assertions.push("Chinese settings distinguishes missing answer echo and expands English diagnostic text with the check ID on demand");
+  service.mode("ui-codex", "answer");
+  await page.evaluate(`Array.from(document.querySelector(${JSON.stringify(toolSelector)}).querySelectorAll('button')).find(b=>b.textContent==='检查工具').click()`);
+  await page.until(`document.querySelector(${JSON.stringify(toolSelector + " [data-endpoint-check=tools]")}).textContent.includes('当前模型已验证')`, 30000);
+  save("tools-passed-zh.png", await page.capture());
+  assertions.push("Retrying the same tool check recovers to verified without changing the connection");
   const report = { ok: true, assertions, requests: service.requests.length };
   save("result.json", JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report));

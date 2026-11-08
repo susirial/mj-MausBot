@@ -3,6 +3,7 @@ import { codexToolSurfaceArgs } from "./codex-tool-surface.ts";
 import { codexShellDisabled, GUEST_CONFINED_CODEX_ARGS } from "./codex-guest.ts";
 import { TEAM_TOOLS_FAILED, teamToolsFailed } from "./team-tools.ts";
 import { enabledMcpMounts, mcpStartupTracker, supportsMcpStartup } from "./codex-mcp-startup.ts";
+import { codexMcpApprovalIdentity } from "./mcp-approval-identity.ts";
 import { boxProxyEnvNames, type McpApprovalMode, mountMcpServer } from "./codex-mcp-mount.ts";
 import { reportUnsupportedCalls, rolloutMark, type RolloutMark } from "./codex-unsupported-calls.ts";
 // The `codex` CLI headless over its app-server JSON-RPC (NDJSON on stdio): completion is
@@ -638,6 +639,8 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         const baseEnv = new Map(Object.entries(env).filter(([, value]) => value !== undefined));
         const mountedNames = new Set<string>();
         const selectedMcp = new Map<string, StdioMcpSpec>();
+        const mountedMcpNames = new Map<string, string>();
+        const selectedCustomMcpNames = new Map<string, string>();
         const selectedApprovals = new Map<string, McpApprovalMode>();
         const directoryMounts = new Set<string>();
         const directMounts: string[] = [];
@@ -670,6 +673,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           const selected = scopedServer(name, mountName, server);
           if (selected) {
             selectedMcp.set(mountName, selected);
+            mountedMcpNames.set(mountName, name);
             selectedApprovals.set(mountName, approval);
             mountMcpServer(appServerArgs, env, mountName, selected, approval, literalEnvs.get(mountName), mountedNames, forward);
             if (turn.toolScope !== undefined && approval === "prompt") appServerArgs.push("-c", `mcp_servers.${mountName}.default_tools_approval_mode="prompt"`);
@@ -694,10 +698,20 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         if (turn.toolScope !== undefined) {
           for (const name of declaredInCodexConfig) appServerArgs.push("-c", `mcp_servers.${name}.enabled=false`);
         }
-        for (const [name, server] of Object.entries(turn.integrations?.custom ?? {}).filter(([name, server]) => turn.toolScope !== undefined || !codexConfigRunsServer(codexConfig, name, server))) {
-          const mountName = mountedMcpServerName(name, declaredInCodexConfig);
+        const allocatedMcpNames = new Set([...declaredInCodexConfig, ...selectedMcp.keys(), ...(turn.integrations?.phone ? ["openmausbot_phone"] : [])]);
+        for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
+          if (turn.toolScope === undefined && codexConfigRunsServer(codexConfig, name, server)) {
+            mountedMcpNames.set(name, name);
+            selectedCustomMcpNames.set(name, name);
+            continue;
+          }
+          const mountName = mountedMcpServerName(name, allocatedMcpNames);
           if (mountName !== name) noteRenamedMcpServer(name, mountName);
           mountSelected(name, mountName, server, "prompt", turn.toolScope === undefined && !("url" in server) ? boxProxyEnvNames() : []);
+          if (selectedMcp.has(mountName)) {
+            allocatedMcpNames.add(mountName);
+            selectedCustomMcpNames.set(mountName, name);
+          }
         }
         if (turn.integrations?.phone) {
           if (turn.toolScope !== undefined) {
@@ -708,6 +722,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           for (const name of Object.keys(bridge.env)) mountedNames.add(name);
           const prefix = "mcp_servers.openmausbot_phone";
           directMounts.push("openmausbot_phone");
+          mountedMcpNames.set("openmausbot_phone", "phone");
           appServerArgs.push(
             "-c", `${prefix}.command=${JSON.stringify(bridge.command)}`,
             "-c", `${prefix}.args=${JSON.stringify(bridge.args)}`,
@@ -1036,6 +1051,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
           requestId,
           requestType: isQuestion ? "question" : "permission",
           tool,
+          ...(isLegacyMcpPermission ? { toolIdentity: codexMcpApprovalIdentity(params, mountedMcpNames) } : {}),
           summary, ...mcpAppApprovalText(mcpAppApproval),
           ...shellRequest(shell, params.cwd ?? (
             !params.threadId || params.threadId === codexThreadId ? commandCwd : undefined
@@ -1053,6 +1069,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const seenReviews = new Set<string>();
       let reviewWarning = false;
       let teamToolsNoticed = false;
+      const failedCustomMcpNames = new Set<string>();
       let rolloutAt: RolloutMark | null = null; // where the native rollout ended when this turn began: a refused call's only trace
       let timedOutReview = false;
       const retryMode = approvalMode[0].toUpperCase() + approvalMode.slice(1);
@@ -1099,6 +1116,11 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
         // MCP servers start with the thread, before it has an id; this process serves this turn alone.
         if (msg.method === "mcpServer/startupStatus/updated") {
           mcpStartup.record(p);
+          const customName = typeof p.name === "string" ? selectedCustomMcpNames.get(p.name) : undefined;
+          if (customName && (p.status === "failed" || p.status === "cancelled") && !failedCustomMcpNames.has(customName)) {
+            failedCustomMcpNames.add(customName);
+            emit({ ...base(threadId, turnId), type: "runtime.notice", message: "A selected MCP server did not start.", mcpFailed: [customName] });
+          }
           if (!teamToolsNoticed && teamToolsFailed(p)) {
             teamToolsNoticed = true;
             emit({ ...base(threadId, turnId), type: "runtime.notice", message: TEAM_TOOLS_FAILED });

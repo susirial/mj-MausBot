@@ -46,10 +46,18 @@ export type EndpointConnection =
   };
 
 export type EndpointCheckKind = "answer" | "tools" | "background";
+export type EndpointCheckCode =
+  | "mcp_startup_failed"
+  | "tool_denied"
+  | "tool_approval_failed"
+  | "tool_unsupported"
+  | "tool_not_called"
+  | "tool_receipt_mismatch"
+  | "tool_answer_missing";
 export type EndpointCheckResult =
   | { state: "unverified" }
   | { state: "checking"; model: string; kind: EndpointCheckKind }
-  | { state: "passed"; model: string; kind: EndpointCheckKind; checkedAt: number; reportedModel?: string }
+  | { state: "passed"; model: string; kind: EndpointCheckKind; checkedAt: number; reportedModel?: string; checkId?: string }
   | {
     state: "failed";
     model: string;
@@ -57,6 +65,10 @@ export type EndpointCheckResult =
     checkedAt: number;
     reason: "credentials" | "model" | "protocol" | "timeout" | "rate_limit" | "other";
     message: string;
+    /** Check-local failure evidence. Missing evidence never proves a provider protocol defect. */
+    code?: EndpointCheckCode;
+    /** Opaque identifier to find this check's redacted server log. */
+    checkId?: string;
   };
 
 export type EndpointInfo = EndpointConnection & {

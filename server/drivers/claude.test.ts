@@ -1844,6 +1844,70 @@ describe("ClaudeDriver turns (fake CLI)", () => {
     expect(after.settings.env.ANTHROPIC_API_KEY).toBe("synthetic-new");
   });
 
+  it("preloads only named supplied custom MCP servers through the gate and rebuilds when preload changes", async () => {
+    const dump = join(scratch, "custom-preload.json");
+    await create(undefined, { HOME: scratch, FAKE_CLAUDE_DUMP: dump });
+    const custom = {
+      endpoint_check: { command: "fixture-only", args: [], env: {} },
+      other: { command: "other-fixture", args: [], env: {} },
+    };
+    const run = async (preloadMcpServers: readonly string[]) => {
+      const { turnId } = await instance.adapter.sendTurn({
+        threadId: "custom-preload", text: "Fixture", cwd: scratch, integrations: { custom }, preloadMcpServers,
+      });
+      await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+      return JSON.parse(readFileSync(dump, "utf8"));
+    };
+    const loaded = await run(["endpoint_check", "missing", "browser"]);
+    expect(loaded.mcpConfig.mcpServers.endpoint_check.alwaysLoad).toBe(true);
+    expect(loaded.mcpConfig.mcpServers.endpoint_check.command).toBe(process.execPath);
+    expect(loaded.mcpConfig.mcpServers.other.alwaysLoad).toBeUndefined();
+    expect(loaded.mcpConfig.mcpServers.missing).toBeUndefined();
+    expect(loaded.settings.env.ENABLE_TOOL_SEARCH).toBe("true");
+    const allowed = loaded.argv[loaded.argv.indexOf("--allowedTools") + 1].split(",");
+    expect(allowed).not.toContain("mcp__endpoint_check");
+    expect(allowed).not.toContain("mcp__endpoint_check__echo");
+    const deferred = await run([]);
+    expect(deferred.mcpConfig.mcpServers.endpoint_check.alwaysLoad).toBeUndefined();
+    expect(deferred.pid).not.toBe(loaded.pid);
+    const { turnId } = await instance.adapter.sendTurn({
+      threadId: "custom-preload", text: "Fixture", cwd: scratch, integrations: { custom },
+      preloadMcpServers: ["endpoint_check"], toolScope: { allow: ["native:*", "mcp:other:*"] },
+    });
+    await recorder.until((event) => event.type === "turn.completed" && event.turnId === turnId);
+    expect(JSON.parse(readFileSync(dump, "utf8")).mcpConfig.mcpServers.endpoint_check).toBeUndefined();
+  });
+
+  it("resolves mounted qualified MCP identity only for execution permissions", async () => {
+    await create("hang", { HOME: scratch });
+    const threadId = "mcp-identity";
+    await instance.adapter.sendTurn({ threadId, text: "Fixture", cwd: scratch, integrations: { custom: {
+      endpoint_check: { command: "fixture-only", args: [], env: {} },
+      nested: { command: "nested-fixture", args: [], env: {} },
+      nested__server: { command: "ambiguous-fixture", args: [], env: {} },
+    } } });
+    const conn = await connectSocket(permissionSocketPath(threadId));
+    try {
+      for (const [index, ask] of [
+        { tool: "mcp__endpoint_check__echo", kind: "permission", expected: { kind: "mcp", server: "endpoint_check", name: "echo" } },
+        { tool: "mcp__endpoint_check__echo", kind: "question", expected: undefined },
+        { tool: "mcp__unknown__echo", kind: "permission", expected: undefined },
+        { tool: "mcp__nested__server__echo", kind: "permission", expected: undefined },
+      ].entries()) {
+        const id = `mcp-identity-${index}`;
+        conn.write(JSON.stringify({ t: "ask", id, tool: ask.tool, kind: ask.kind, input: {} }) + "\n");
+        const opened = await recorder.until((event) => event.type === "request.opened" && event.requestId === id);
+        expect(opened).toHaveProperty("tool", ask.tool);
+        expect(opened.type === "request.opened" ? opened.toolIdentity : undefined).toEqual(ask.expected);
+        await instance.adapter.respondToRequest(threadId, id, { behavior: ask.kind === "question" ? "answer" : "deny", message: "No" });
+      }
+    } finally {
+      conn.destroy();
+    }
+    await instance.adapter.interruptTurn(threadId);
+    await recorder.until((event) => event.type === "turn.completed");
+  });
+
   it("loads third-party MCP tools on demand and keeps OpenMausBot's own servers loaded", async () => {
     await create();
     const dump = join(scratch, "tool-search.json");

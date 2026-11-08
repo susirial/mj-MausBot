@@ -3,6 +3,7 @@
 import type { AskQuestion } from "./ask-question.ts";
 import type { ServerText, ServerTextParams } from "./server-text.ts";
 import type { LiveStep, TurnProgressFields } from "./turn-progress.ts";
+import type { ToolIdentity } from "./tool-scope.ts";
 
 export type DriverKind = string;
 export type InstanceId = string;
@@ -129,6 +130,8 @@ export type RuntimeEvent = RuntimeEventBase &
         type: "request.opened";
         requestType: "permission" | "question";
         tool: string;
+        /** Original tool identity resolved by the driver from this launch's MCP mounts. Display labels do not grant permission. */
+        toolIdentity?: ToolIdentity;
         summary: string;
         /** Fixed `chat.notice.*` summary words beside their English fallback; absent for provider-authored text. */
         summaryCode?: string;
@@ -201,7 +204,11 @@ export type RuntimeEvent = RuntimeEventBase &
         text?: ServerText }
     /** Something the person should know that did not fail the turn — for
      * example, a saved model the engine no longer offers was replaced. */
-    | { type: "runtime.notice"; message: string; text?: ServerText }
+    | {
+        type: "runtime.notice"; message: string; text?: ServerText;
+        /** Selected custom MCP servers explicitly reported failed or cancelled after session startup. */
+        mcpFailed?: string[];
+      }
   );
 
 export type RuntimeEventListener = (event: RuntimeEvent) => void;

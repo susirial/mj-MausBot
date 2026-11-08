@@ -320,8 +320,16 @@ function EndpointRow({ instance, onEdit, onSaved, readOnly, editorOpen }: {
         return <div key={kind} className="min-w-0 space-y-1">
           {!readOnly && <button type="button" className="ui-button" disabled={editorOpen || checking !== null || removing
             || !endpointModelStatus(instance, model, { state: "unverified" }).canSelect} onClick={() => void runCheck(kind)}>{t(`engineEndpoints.check.${kind}`)}</button>}
-          <p data-endpoint-check={kind} role="status" className="text-[11px] text-ink-secondary">{t(`engineEndpoints.check.${kind}`)} · {t(ENDPOINT_STATUS_COPY[status.kind])}</p>
-          {result.state === "failed" && <p className="max-w-sm break-words text-[12px] text-danger">{result.message}</p>}
+          <p data-endpoint-check={kind} role="status" className="text-[11px] text-ink-secondary">{t(`engineEndpoints.check.${kind}`)} · {t(result.state === "failed" && result.code
+            ? "engineEndpoints.status.tools" : ENDPOINT_STATUS_COPY[status.kind])}</p>
+          {result.state === "failed" && <div className="max-w-sm space-y-1 break-words text-[12px]">
+            <p className="text-danger">{result.code ? t(`engineEndpoints.failure.${result.code}`) : result.message}</p>
+            {(result.code || result.checkId) && <details className="text-ink-secondary">
+              <summary className="cursor-pointer">{t("engineEndpoints.details")}</summary>
+              {result.code && <p>{result.message}</p>}
+              {result.checkId && <p>{t("engineEndpoints.checkId", { id: result.checkId })}</p>}
+            </details>}
+          </div>}
           {result.state === "passed" && <p className="text-[11px] text-ink-secondary">{new Date(result.checkedAt).toLocaleString()}
             {result.reportedModel && ` · ${t("engineEndpoints.reported", { model: result.reportedModel })}`}</p>}
         </div>;

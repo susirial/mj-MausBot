@@ -12,6 +12,22 @@ Saving, opening settings, and refreshing the app do not send a model request.
 Answer, tool, and background checks run only when clicked and may incur provider
 charges. Each result applies to its model, connection revision, and CLI version.
 
+A tool check requires both a matching receipt from the temporary echo tool and
+the returned text in the assistant's answer. Tool output alone does not pass.
+The checker authorizes only execution permissions identified by the driver as
+the mounted `endpoint_check` server's `echo` tool. A display label such as `echo`
+alone cannot grant permission. Claude loads this supplied check server eagerly
+for the check turn; other turns keep their existing tool-search behavior.
+
+Tool failures distinguish startup failure, denied permission, failed approval
+delivery, unsupported routing, missing invocation, mismatched receipt, and
+missing answer text. Missing invocation or answer text does not establish a
+provider protocol defect. In Chinese, these results show “工具验证未通过” with a
+specific explanation. Expand “检查详情” for the English message and check ID.
+Server logs contain one `[endpoint-check]` record per completed check with that
+ID, bounded approval decisions, and receipt/answer booleans. The record excludes
+the nonce, receipt path, credentials, and raw provider output.
+
 Editing a connection keeps its key when the field is empty. Changing the service
 or address requires a new key. A running connection rejects edits, preserving the
 draft. Remove a connection after clearing its bot, task, and fallback references.
@@ -32,6 +48,9 @@ node --experimental-strip-types scripts/verify-engine-endpoints.ts \
   --scenario tool-roundtrip --evidence-dir /tmp/omb-endpoints/tools
 
 node --experimental-strip-types scripts/verify-engine-endpoints.ts \
+  --scenario tool-diagnostics --evidence-dir /tmp/omb-endpoints/diagnostics
+
+node --experimental-strip-types scripts/verify-engine-endpoints.ts \
   --scenario background-route --evidence-dir /tmp/omb-endpoints/background
 
 node --experimental-strip-types scripts/verify-engine-endpoints.ts \
@@ -46,6 +65,12 @@ Each run owns a temporary app, fake CLIs, and a loopback HTTP provider. It recor
 specified directory, then closes its processes and removes temporary app data.
 It does not use the user's app, real credentials, or remote model services.
 
+`tool-roundtrip` exercises each fake CLI's native approval channel before
+calling the real local MCP echo process. It also verifies the delivered approval,
+matching receipt, and assistant echo in the server log. `tool-diagnostics`
+exercises failed startup, missing invocation, missing answer echo, and Codex
+unsupported-call routing, then retries successfully.
+
 ## Complete application UI verification
 
 Build the client, then run the real application in Chrome against its isolated
@@ -57,11 +82,13 @@ node --experimental-strip-types scripts/verify-engine-endpoints-ui.mjs \
   --evidence-dir /tmp/omb-endpoints/ui
 ```
 
-The script creates Codex and Claude connections from settings, checks both,
-selects a Codex model in the picker, sends a message, and reloads to verify the
-selection and transcript. It writes `settings.png`, `picker.png`, `chat.png`, and
-`result.json`. Google Chrome on macOS is the default; `OMB_CDP_CHROME` overrides
-the executable path.
+The script creates Codex and Claude connections from settings, checks answers
+and tools for both, selects a Codex model in the picker, sends a message, and
+reloads to verify the selection and transcript. It then exercises a missing
+answer echo, checks the Chinese explanation and expandable English details, and
+retries successfully. It writes `settings.png`, `picker.png`, `chat.png`,
+`tools-failure-zh.png`, `tools-passed-zh.png`, and `result.json`. Google Chrome on
+macOS is the default; `OMB_CDP_CHROME` overrides the executable path.
 
 For a narrow form check:
 

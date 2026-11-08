@@ -173,6 +173,95 @@ describe("CodexDriver turns (fake app-server)", () => {
     agents: { command: process.execPath, args: ["agents-proxy.js"], env: {} },
   };
 
+  it("publishes the original selected custom name when its renamed mount fails startup", async () => {
+    mkdirSync(join(scratch, ".codex"));
+    writeFileSync(join(scratch, ".codex/config.toml"), '[mcp_servers.endpoint_check]\ncommand="ambient"\n');
+    await create({ environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex"), FAKE_CODEX_MCP_FAILED: "endpoint_check_openmausbot" } });
+    await instance.adapter.sendTurn({ threadId: "custom-start-failed", text: "Fixture", integrations: {
+      custom: { endpoint_check: { command: "fixture-only", args: [], env: {} } },
+    } });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.filter((event) => event.type === "runtime.notice" && event.mcpFailed))
+      .toMatchObject([{ message: "A selected MCP server did not start.", mcpFailed: ["endpoint_check"] }]);
+  });
+
+  it("resolves strict MCP approval identity through suffix2 without changing its label or response", async () => {
+    mkdirSync(join(scratch, ".codex"));
+    writeFileSync(join(scratch, ".codex/config.toml"), '[mcp_servers.endpoint_check]\ncommand="ambient"\n[mcp_servers.endpoint_check_openmausbot]\ncommand="ambient2"\n');
+    const mount = "endpoint_check_openmausbot2";
+    process.env.FAKE_CODEX_APPROVAL_REQUEST = JSON.stringify({ method: "mcpServer/elicitation/request", params: {
+      serverName: mount, mode: "form", message: `Allow the ${mount} MCP server to run tool "echo"?`,
+      _meta: { codex_approval_kind: "mcp_tool_call", tool_params: {} }, requestedSchema: { type: "object", properties: {} },
+    } });
+    const dump = join(scratch, "identity-suffix2.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    await create({ mode: "approval", environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex") } });
+    await instance.adapter.sendTurn({ threadId: "identity-suffix2", text: "Fixture", integrations: {
+      custom: { endpoint_check: { command: "fixture-only", args: [], env: {} } },
+    } });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    expect(opened).toMatchObject({
+      requestType: "permission", tool: "echo", summary: `Allow the ${mount} MCP server to run tool "echo"?`,
+      toolIdentity: { kind: "mcp", server: "endpoint_check", name: "echo" },
+    });
+    await instance.adapter.respondToRequest("identity-suffix2", opened.requestId!, { behavior: "allow" });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ action: "accept", content: {} });
+  });
+
+  it("reserves allocated custom mount names when another selected name collides", async () => {
+    mkdirSync(join(scratch, ".codex"));
+    writeFileSync(join(scratch, ".codex/config.toml"), '[mcp_servers.endpoint_check]\ncommand="ambient"\n');
+    const dump = join(scratch, "allocated-mounts.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+    await create({ environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex") } });
+    await instance.adapter.sendTurn({ threadId: "allocated-mounts", text: "Fixture", integrations: { custom: {
+      endpoint_check: { command: "first-fixture", args: [], env: {} },
+      endpoint_check_openmausbot: { command: "second-fixture", args: [], env: {} },
+    } } });
+    await recorder.until((event) => event.type === "turn.completed");
+    const argv = JSON.parse(readFileSync(dump, "utf8")).argv;
+    expect(argv).toContain('mcp_servers.endpoint_check_openmausbot.command="first-fixture"');
+    expect(argv).toContain('mcp_servers.endpoint_check_openmausbot_openmausbot.command="second-fixture"');
+  });
+
+  it("reports selected custom cancelled startup once and ignores unrelated mounts", async () => {
+    process.env.FAKE_CODEX_REVIEW_EVENTS = JSON.stringify([
+      { method: "mcpServer/startupStatus/updated", params: { name: "endpoint_check", status: "cancelled" } },
+      { method: "mcpServer/startupStatus/updated", params: { name: "endpoint_check", status: "failed" } },
+      { method: "mcpServer/startupStatus/updated", params: { name: "unknown", status: "failed" } },
+      { method: "mcpServer/startupStatus/updated", params: { name: "agents", status: "cancelled" } },
+    ]);
+    await create({ environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex") } });
+    await instance.adapter.sendTurn({ threadId: "custom-start-cancelled", text: "Fixture", integrations: {
+      custom: { endpoint_check: { command: "fixture-only", args: [], env: {} } },
+    } });
+    await recorder.until((event) => event.type === "turn.completed");
+    expect(recorder.events.filter((event) => event.type === "runtime.notice" && event.mcpFailed))
+      .toMatchObject([{ mcpFailed: ["endpoint_check"] }]);
+  });
+
+  it.each([
+    { label: "wrong sentence server", params: { serverName: "endpoint_check", message: 'Allow the wrong MCP server to run tool "echo"?' } },
+    { label: "unknown actual mount", params: { serverName: "unknown", message: 'Allow the unknown MCP server to run tool "echo"?' } },
+    { label: "trailing sentence", params: { serverName: "endpoint_check", message: 'Allow the endpoint_check MCP server to run tool "echo"? Harmless.' } },
+    { label: "embedded quotes", params: { serverName: "endpoint_check", message: 'Allow the endpoint_check MCP server to run tool "echo" and "delete"?' } },
+    { label: "control", params: { serverName: "endpoint_check", message: 'Allow the endpoint_check MCP server to run tool "echo\n"?' } },
+  ])("leaves $label MCP approval identity unknown and asks normally", async ({ params }) => {
+    process.env.FAKE_CODEX_APPROVAL_REQUEST = JSON.stringify({ method: "mcpServer/elicitation/request", params: {
+      ...params, mode: "form", _meta: { codex_approval_kind: "mcp_tool_call" }, requestedSchema: { type: "object", properties: {} },
+    } });
+    await create({ mode: "approval", environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex") } });
+    await instance.adapter.sendTurn({ threadId: "unknown-identity", text: "Fixture", integrations: {
+      custom: { endpoint_check: { command: "fixture-only", args: [], env: {} } },
+    } });
+    const opened = await recorder.until((event) => event.type === "request.opened");
+    if (opened.type !== "request.opened" || opened.requestId === undefined) throw new Error("expected permission");
+    expect(opened.toolIdentity).toBeUndefined();
+    await instance.adapter.respondToRequest("unknown-identity", opened.requestId, { behavior: "deny" });
+    await recorder.until((event) => event.type === "turn.completed");
+  });
+
   it("starts a new thread's turn only once the MCP servers it mounted finished starting", async () => {
     const dump = join(scratch, "mcp-ready.json"); process.env.FAKE_CODEX_DUMP = dump;
     await create({ environment: { HOME: scratch, CODEX_HOME: join(scratch, ".codex"), FAKE_CODEX_MCP_READY_MS: "400", FAKE_CODEX_MCP_STAGGER: "1" } });
@@ -1623,6 +1712,19 @@ process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:m.id,result})+'\\n');});`)
       await instance.adapter.respondToRequest("t-plan-call", opened.requestId!, { behavior: "allow" });
       await recorder.until((event) => event.type === "turn.completed");
       expect(JSON.parse(readFileSync(dump, "utf8")).decision).toEqual({ action: "accept", content: {} });
+    });
+
+    it("does not stamp a directory echo target as a direct echo approval", async () => {
+      plan();
+      process.env.FAKE_CODEX_APPROVAL_REQUEST = elicitation("call_tool", { name: "echo", arguments: {} });
+      await create({ authMode: "chatgpt-plan", mode: "approval" });
+      await instance.adapter.sendTurn({ threadId: "directory-identity", text: "Fixture", model: "gpt-6.1-sol", integrations: {
+        custom: { whop },
+      } });
+      const opened = await recorder.until((event) => event.type === "request.opened");
+      expect(opened).toMatchObject({ tool: "echo", toolIdentity: { kind: "mcp", server: "whop", name: "call_tool" } });
+      await instance.adapter.respondToRequest("directory-identity", opened.requestId!, { behavior: "deny" });
+      await recorder.until((event) => event.type === "turn.completed");
     });
 
     it("answers a catalog read for no card only when Codex asks exactly about it", async () => {

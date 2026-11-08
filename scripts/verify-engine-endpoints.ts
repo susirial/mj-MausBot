@@ -10,10 +10,11 @@ import { z } from "zod";
 import { startFakeEngineEndpoint, type FixtureFailure } from "../server/testing/fake-engine-endpoint.ts";
 import { waitForExit } from "../server/testing/cleanup.ts";
 import type { VerificationServer } from "./control-omb.ts";
+import type { EndpointCheckCode } from "../shared/engine-endpoint.ts";
 
 export const endpointScenarios = [
   "official-regression", "codex-deepseek", "codex-kimi", "claude-deepseek", "claude-kimi",
-  "background-route", "tool-roundtrip", "parallel-isolation", "failure-states", "metadata-restart",
+  "background-route", "tool-roundtrip", "tool-diagnostics", "parallel-isolation", "failure-states", "metadata-restart",
 ] as const;
 const scenarioSchema = z.enum(endpointScenarios);
 const runtimeSchema = z.enum(["codex", "claude"]);
@@ -71,13 +72,14 @@ export async function verifyEngineEndpoints(options: { scenario: z.infer<typeof 
     if (!fixture) throw new Error("Fixture not launched");
     return savedSchema.parse(JSON.parse(readFileSync(join(fixture.info.dataDir, "config.json"), "utf8")));
   };
-  const cli = (runtime: Connection["runtime"]) => {
+  const cli = (runtime: Connection["runtime"], toolMode?: "startup-failed" | "unsupported") => {
     if (!fixture) throw new Error("Fixture not launched");
     const path = join(fixture.info.dataDir, `endpoint-${runtime}.mjs`);
     writeFileSync(path, [
       "#!/usr/bin/env node",
       `process.env.${runtime === "claude" ? "FAKE_CLAUDE_ENDPOINT" : "FAKE_CODEX_ENDPOINT"} = "1";`,
       `process.env.${runtime === "claude" ? "FAKE_CLAUDE_VERSION" : "FAKE_CODEX_VERSION"} = ${JSON.stringify(runtime === "claude" ? "2.1.296" : "codex-cli 0.167.0")};`,
+      ...(toolMode ? [`process.env.FAKE_ENDPOINT_TOOL_MODE = ${JSON.stringify(toolMode)};`] : []),
       `await import(${JSON.stringify(pathToFileURL(join(ownRoot, "server/testing", runtime === "claude" ? "fake-claude-cli.ts" : "fake-codex-app-server.ts")).href)});`,
     ].join("\n"), { mode: 0o700 });
     return path;
@@ -118,7 +120,7 @@ export async function verifyEngineEndpoints(options: { scenario: z.infer<typeof 
       connections.push(connection);
     }
   };
-  const check = async (connection: Connection, kind: "answer" | "tools" | "background", reason?: string) => {
+  const check = async (connection: Connection, kind: "answer" | "tools" | "background", reason?: string, code?: EndpointCheckCode) => {
     const before = service.requests.length;
     const body = z.object({ check: z.object({ state: z.string(), reason: z.string().optional() }).passthrough() }).parse(
       await api("POST", `/api/instances/${connection.instanceId}/engine-endpoint/check`, {
@@ -126,6 +128,7 @@ export async function verifyEngineEndpoints(options: { scenario: z.infer<typeof 
       }));
     prove(body.check.state === (reason ? "failed" : "passed"), `${connection.name} ${kind} check ${reason ? "fails" : "passes"}`);
     if (reason) prove(body.check.reason === reason, `${connection.name} reports ${reason}`);
+    if (code) prove(body.check.code === code, `${connection.name} reports ${code}`);
     const requests = service.requests.slice(before).filter(receipt => receipt.connection === connection.name);
     prove(requests.length > 0, `${connection.name} ${kind} reaches the HTTP service`);
     prove(requests.every(receipt => receipt.authorized && receipt.model === (kind === "background" ? connection.background : connection.model)),
@@ -193,8 +196,35 @@ export async function verifyEngineEndpoints(options: { scenario: z.infer<typeof 
         service.mode(connection.name, "answer");
         await check(connection, "answer");
       }
+    } else if (scenario === "tool-diagnostics") {
+      for (const connection of connections) {
+        for (const [mode, code] of [["no-tool", "tool_not_called"], ["no-echo", "tool_answer_missing"]] satisfies Array<[FixtureFailure, EndpointCheckCode]>) {
+          service.mode(connection.name, mode);
+          await check(connection, "tools", "other", code);
+        }
+        service.mode(connection.name, "answer");
+        cli(connection.runtime, "startup-failed");
+        await check(connection, "tools", "other", "mcp_startup_failed");
+        if (connection.runtime === "codex") {
+          cli(connection.runtime, "unsupported");
+          await check(connection, "tools", "protocol", "tool_unsupported");
+        }
+        cli(connection.runtime);
+        await check(connection, "tools");
+      }
     } else if (scenario === "background-route" || scenario === "tool-roundtrip") {
       for (const connection of connections) await check(connection, scenario === "background-route" ? "background" : "tools");
+      if (scenario === "tool-roundtrip") {
+        if (!fixture) throw new Error("Fixture not launched");
+        const records = readFileSync(fixture.info.logPath, "utf8").split("\n").flatMap(line => {
+          const match = /\[endpoint-check\] (\{.*\})/.exec(line);
+          return match ? [z.object({ instanceId: z.string(), receipt: z.literal("matched"), answerEcho: z.literal(true),
+            approvals: z.array(z.object({ decision: z.string(), outcome: z.string().optional() })).min(1) }).parse(JSON.parse(match[1]))] : [];
+        });
+        for (const connection of connections) prove(records.some(record => record.instanceId === connection.instanceId
+          && record.approvals.some(approval => approval.decision === "allow" && approval.outcome === "allowed-once")),
+        `${connection.name} records a delivered approval, matching receipt, and assistant echo`);
+      }
     } else if (scenario === "parallel-isolation") {
       await Promise.all(connections.map(async connection => { await check(connection, "answer"); await chat(connection.instanceId, connection.model, connection.name); }));
       const homes = connections.map(connection => new Set(service.requests.filter(receipt => receipt.connection === connection.name).map(receipt => receipt.home)));

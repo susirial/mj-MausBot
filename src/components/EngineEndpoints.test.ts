@@ -6,6 +6,7 @@ import * as store from "@/state/store";
 import { accountGroupOf } from "./EngineAccounts";
 import { engineReady } from "./EngineLibrary";
 import type { EndpointConnection, EndpointModel } from "../../shared/engine-endpoint";
+import { setLocale } from "@/lib/i18n";
 
 const model: EndpointModel = { id: "fixture-model", label: "Fixture", source: "configured", inputModalities: ["text"], effortLevels: [], nativeSearch: "unknown" };
 const connection = {
@@ -51,6 +52,7 @@ afterEach(async () => {
   container?.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+  setLocale("en");
 });
 
 async function mount(instances: store.InstanceInfo[] = []) {
@@ -149,6 +151,26 @@ it("checks only on request and keeps an answer success separate from tools and b
   expect(container.querySelector('[data-endpoint-check="tools"]')?.textContent).toContain("not verified");
   expect(container.querySelector('[data-endpoint-check="background"]')?.textContent).toContain("not verified");
   expect(container.textContent).toContain("fixture-reported");
+});
+
+it.each([
+  ["en", "Check tools", "Check tools · Tool check failed", "The tool ran, but the assistant answer did not include its returned text."],
+  ["zh", "检查工具", "检查工具 · 工具验证未通过", "工具已执行，但助手回答未回显工具返回的内容。"],
+])("shows the tool failure stage in %s and keeps the server fallback in details", async (locale, button, status, message) => {
+  setLocale(locale);
+  vi.spyOn(store, "api").mockImplementation(async path => path === "/api/engine-endpoint-presets" ? { presets: [] } : {
+    check: { state: "failed", model: model.id, kind: "tools", checkedAt: 1000, reason: "other",
+      code: "tool_answer_missing", checkId: "endpoint-check-fixture", message: "Server fallback detail" },
+  });
+  await mount([endpointInstance()]);
+  await click(button);
+  expect(container.querySelector('[data-endpoint-check="tools"]')?.textContent).toBe(status);
+  const details = container.querySelector("details");
+  expect(details?.textContent).toContain("Server fallback detail");
+  expect(details?.textContent).toContain("endpoint-check-fixture");
+  expect(details?.open).toBe(false);
+  expect(container.textContent).toContain(message);
+  expect(container.querySelector('[data-endpoint-check="answer"]')?.textContent).not.toContain(status);
 });
 
 it("does not save an edited address without a new key", async () => {

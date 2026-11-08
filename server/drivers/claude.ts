@@ -15,6 +15,7 @@ import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli 
 import { cliVersionProbe } from "../cli-version-probe.ts";
 import { claudeAuthStatus } from "./claude-auth-status.ts";
 import { projectMcpServers } from "./claude-project-mcp.ts";
+import { claudeMcpApprovalIdentity } from "./mcp-approval-identity.ts";
 import { botSettingsFor, isClaudeEndpointProtectedEnv, withBotSettings } from "./claude-bot-settings.ts";
 import { ENDPOINT_API_KEY_ENV, endpointConnectionSchema, endpointModelCatalog as connectionModelCatalog, type EndpointConnection } from "../engine-endpoints.ts";
 import { compileEndpointLaunch, prepareEndpointFiles } from "./endpoint-launch.ts";
@@ -1164,7 +1165,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const botOwned = new Set<string>();
       for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
         if (Object.hasOwn(mcpServers, name)) continue;
-        mcpServers[name] = { ...server };
+        mcpServers[name] = { ...server, ...(turn.preloadMcpServers?.includes(name) ? { alwaysLoad: true } : {}) };
         botOwned.add(name);
       }
       // --strict-mcp-config makes this the CLI's only MCP source, so the bot project's servers merge
@@ -1333,6 +1334,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
                 requestId: ask.id,
                 requestType: ask.kind,
                 tool: ask.tool,
+                ...(ask.kind === "permission" ? { toolIdentity: claudeMcpApprovalIdentity(ask.tool, Object.keys(mcpServers)) } : {}),
                 summary: askSummary(ask),
                 // The Bash command, for exact-command grants and for the safety floor.
                 ...shellRequest(ask.kind === "permission" && ask.tool === "Bash" ? ask.input.command : undefined, commandCwd), ...(ask.kind === "permission" && readToolPaths(ask.tool, ask.input) ? { reads: readToolPaths(ask.tool, ask.input) } : {}),
