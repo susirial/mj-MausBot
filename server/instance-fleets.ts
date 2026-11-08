@@ -1,6 +1,7 @@
 // The engine instances a fresh install starts with, and the ones an existing product fleet gains.
 // instanceConfigs (config.ts) copies every entry before it changes one.
 import type { InstanceConfigMap } from "./contracts.ts";
+import { isEngineEndpoint } from "./engine-endpoints.ts";
 
 export const OPENAI_API_INSTANCE = "openai";
 export const OPENROUTER_API_INSTANCE = "openrouter";
@@ -57,6 +58,12 @@ const CUSTOM_ONLY = {
   cline: { driver: "clineAgent" },
   pi: { driver: "piAgent" },
 } as const;
+
+/** A saved fleet that contains only independent API connections never replaced the default accounts. */
+export function instanceConfigBase(configured: InstanceConfigMap | null): InstanceConfigMap {
+  if (configured !== null && Object.values(configured).some((entry) => !isEngineEndpoint(entry))) return { ...configured };
+  return { ...DEFAULT_FLEET, ...configured };
+}
 
 /** Added to a saved fleet that holds a product engine (claude, grok or codex), when it lacks them. */
 export const PRODUCT_FLEET_ADDITIONS = {

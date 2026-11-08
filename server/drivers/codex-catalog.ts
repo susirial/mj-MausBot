@@ -11,6 +11,7 @@ import { codexHome } from "./codex-identity.ts";
 import { unconfirmedModelCatalog } from "../startup-model-catalog.ts";
 import { codexLocalProviderArgs, mergeLocalInject } from "./local-inject.ts";
 import { CODEX_MODEL_ID, decodeCodexSelection, encodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "../../shared/codex-selection.ts";
+export { decodeCodexSelection, encodeCodexSelection, OFFICIAL_CODEX_PROVIDER };
 
 export const STATIC_CODEX_MODELS: ModelCatalog = {
   default: "gpt-5.6-sol",

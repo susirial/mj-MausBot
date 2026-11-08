@@ -15,9 +15,7 @@ import { newBotDefaultsSchema, type NewBotDefaults } from "./new-bot-defaults.ts
 import { replaySettings } from "./replay-settings.ts";
 import { EFFORT_LEVELS, type EffortLevel } from "../shared/wire.ts";
 import { isModelVariant, type InstanceConfigMap, type McpServerSpec, type ModelSelection } from "./contracts.ts";
-import { isEngineEndpoint } from "./engine-endpoints.ts";
-import { API_KEY_FLEET, DEFAULT_FLEET, OPENAI_API_INSTANCE, OPENROUTER_API_INSTANCE, CLAUDE_API_INSTANCE, PRODUCT_FLEET_ADDITIONS } from "./instance-fleets.ts";
-export { CLAUDE_API_INSTANCE, OPENAI_API_INSTANCE, OPENROUTER_API_INSTANCE, XAI_API_INSTANCE } from "./instance-fleets.ts";
+import { API_KEY_FLEET, instanceConfigBase, OPENAI_API_INSTANCE, OPENROUTER_API_INSTANCE, CLAUDE_API_INSTANCE, PRODUCT_FLEET_ADDITIONS } from "./instance-fleets.ts"; export { CLAUDE_API_INSTANCE, OPENAI_API_INSTANCE, OPENROUTER_API_INSTANCE, XAI_API_INSTANCE } from "./instance-fleets.ts";
 import { DEFAULT_WINDOW_MINUTES, MAX_WINDOW_MINUTES } from "./cache-keepwarm.ts";
 import { PROVIDER_ICON_PRESETS, providerIconError } from "../shared/provider-icon.ts";
 import { helperStoredShape, type HelperConfig } from "./side-jobs.ts";
@@ -1174,8 +1172,7 @@ function injectedEnvironment(cfg: AppConfig, instanceId: string, driver: string)
 
 export function instanceConfigs(cfg: AppConfig): InstanceConfigMap {
   const configured = cfg.instances && Object.keys(cfg.instances).length ? cfg.instances : null;
-  const ownFleet = configured !== null && !Object.values(configured).every(isEngineEndpoint);
-  const map: InstanceConfigMap = withoutComputerEngine(ownFleet ? { ...configured } : { ...DEFAULT_FLEET, ...configured });
+  const map: InstanceConfigMap = withoutComputerEngine(instanceConfigBase(configured));
   if (
     configured &&
     (Object.hasOwn(configured, "claude") || Object.hasOwn(configured, "grok") || Object.hasOwn(configured, "codex"))

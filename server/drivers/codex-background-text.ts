@@ -10,7 +10,7 @@ import { join } from "node:path";
 import type { EffortLevel, ModelCatalog, SmallModelFallback, TextGenerationOptions, TextGenerationUsage } from "../contracts.ts";
 import type { killCliTree, spawnCli } from "../procs.ts";
 import { refusesModel } from "../quick-model-fallback.ts";
-import { decodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "../../shared/codex-selection.ts";
+import { decodeCodexSelection, OFFICIAL_CODEX_PROVIDER } from "./codex-catalog.ts";
 import { codexToolSurfaceArgs } from "./codex-tool-surface.ts";
 
 export const CODEX_BACKGROUND_TIMEOUT_MS = 120_000;
